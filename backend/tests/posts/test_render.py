@@ -74,3 +74,38 @@ def test_lists_and_blockquote():
         {"type": "blockquote", "content": [para(text("q"))]},
     ))
     assert out == "<ul><li><p>a</p></li></ul><blockquote><p>q</p></blockquote>"
+
+
+def test_malformed_input_never_raises():
+    cases = [
+        text("x", {"type": "textStyle", "attrs": {"fontFamily": ["Inter"]}}),
+        "stray string child",
+        {"type": "text", "text": None},
+        {"type": "text", "text": "a", "marks": "bold"},
+        {"type": "text", "text": "a", "marks": ["bold", {"type": "link", "attrs": "x"}]},
+    ]
+    for case in cases:
+        assert isinstance(render_html(doc(para(case))), str)
+    assert isinstance(render_html(doc(para(text("x"), textAlign=["center"], lineHeight=["2"]))), str)
+    assert isinstance(render_html(doc({"type": "image", "attrs": {"src": "/a.png", "caption": 5}})), str)
+    assert isinstance(render_html(doc({"type": "paragraph", "attrs": "bad", "content": "bad"})), str)
+
+
+def test_deep_nesting_does_not_raise():
+    node = para(text("deep"))
+    for _ in range(200):
+        node = {"type": "blockquote", "content": [node]}
+    assert isinstance(render_html(doc(node)), str)
+
+
+def test_backslash_image_src_rejected():
+    assert render_html(doc({"type": "image", "attrs": {"src": "/\\evil.com/x.png"}})) == ""
+
+
+def test_boolean_heading_level_defaults_to_h2():
+    out = render_html(doc({"type": "heading", "attrs": {"level": True}, "content": [text("T")]}))
+    assert out == "<h2>T</h2>"
+
+
+def test_line_height_two_point_zero_allowed():
+    assert "2.0" in render_html(doc(para(text("x"), lineHeight="2.0")))
