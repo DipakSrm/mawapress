@@ -17,6 +17,10 @@ from app.modules.seo.slug import make_slug, transliterate
         ('"विराटनगर" समाचार', "biratnagar-samachar"),
         ("Café,विराटनगर", "cafe-biratnagar"),
         ("बाढी। समाचार", "badhi-samachar"),
+        ("कॉलेज", "kolej"),
+        ("डॉक्टर", "doktar"),
+        ("ॐ शान्ति", "om-shanti"),
+        ("मळ", "mal"),
     ],
 )
 def test_make_slug_examples(text, expected):
