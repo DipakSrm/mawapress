@@ -1,14 +1,17 @@
 import uuid
 
 from fastapi import APIRouter, Depends, Header
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import get_redis
 from app.core.errors import AppError
 from app.db.session import get_session
 from app.modules.auth.deps import ROLE_RANK, require_role
 from app.modules.posts import service
 from app.modules.posts.models import Post
 from app.modules.posts.schemas import PostCreate, PostOut, PostUpdate
+from app.modules.public.router import invalidate_post_cache
 from app.modules.users.models import Role, User
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
@@ -36,8 +39,11 @@ async def update_post(
     if_match: str | None = Header(default=None),
     user: User = Depends(any_staff),
     session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
 ) -> Post:
-    return await service.update_post(session, user, post_id, if_match, body)
+    post = await service.update_post(session, user, post_id, if_match, body)
+    await invalidate_post_cache(redis, post)
+    return post
 
 
 @router.post("/{post_id}/submit", response_model=PostOut)
@@ -46,5 +52,12 @@ async def submit_post(post_id: uuid.UUID, user: User = Depends(any_staff), sessi
 
 
 @router.post("/{post_id}/publish", response_model=PostOut)
-async def publish_post(post_id: uuid.UUID, user: User = Depends(editors), session: AsyncSession = Depends(get_session)) -> Post:
-    return await service.publish_post(session, post_id)
+async def publish_post(
+    post_id: uuid.UUID,
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Post:
+    post = await service.publish_post(session, post_id)
+    await invalidate_post_cache(redis, post)
+    return post
