@@ -95,3 +95,6 @@ def downgrade() -> None:
     op.drop_table('outbox')
     op.drop_table('categories')
     # ### end Alembic commands ###
+
+    sa.Enum(name="post_status").drop(op.get_bind(), checkfirst=True)
+    sa.Enum(name="user_role").drop(op.get_bind(), checkfirst=True)
