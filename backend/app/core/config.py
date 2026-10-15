@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     env: str = "dev"
     database_url: str = "postgresql+asyncpg://mawa:mawa@localhost:5432/mawapress"
     redis_url: str = "redis://localhost:6379/0"
-    jwt_secret: str = "dev-only-change-me"
+    jwt_secret: str = "dev-only-change-me-this-is-not-a-real-secret"
     jwt_access_minutes: int = 15
     site_url: str = "https://mawapress.com"
 
