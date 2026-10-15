@@ -78,6 +78,14 @@ async def get_post(session: AsyncSession, post_id: uuid.UUID) -> Post:
     return post
 
 
+async def _get_post_for_update(session: AsyncSession, post_id: uuid.UUID) -> Post:
+    stmt = select(Post).where(Post.id == post_id).with_for_update().execution_options(populate_existing=True)
+    post = await session.scalar(stmt)
+    if post is None:
+        raise AppError(404, "POST_NOT_FOUND", "Post not found")
+    return post
+
+
 async def create_post(session: AsyncSession, author: User, data: PostCreate) -> Post:
     if await session.get(Category, data.category_id) is None:
         raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
@@ -108,7 +116,7 @@ def _check_version(post: Post, if_match: str | None) -> None:
 
 
 async def update_post(session: AsyncSession, user: User, post_id: uuid.UUID, if_match: str | None, data: PostUpdate) -> Post:
-    post = await get_post(session, post_id)
+    post = await _get_post_for_update(session, post_id)
     own_draft = post.author_id == user.id and post.status == PostStatus.draft
     if not (_is_editor(user) or own_draft):
         raise AppError(403, "FORBIDDEN_ROLE", "You cannot edit this post")
@@ -144,7 +152,7 @@ async def update_post(session: AsyncSession, user: User, post_id: uuid.UUID, if_
 
 
 async def submit_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> Post:
-    post = await get_post(session, post_id)
+    post = await _get_post_for_update(session, post_id)
     if not (_is_editor(user) or post.author_id == user.id):
         raise AppError(403, "FORBIDDEN_ROLE", "You cannot submit this post")
     if post.status != PostStatus.draft:
@@ -155,7 +163,7 @@ async def submit_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> 
 
 
 async def publish_post(session: AsyncSession, post_id: uuid.UUID) -> Post:
-    post = await get_post(session, post_id)
+    post = await _get_post_for_update(session, post_id)
     if post.status not in (PostStatus.draft, PostStatus.in_review):
         raise AppError(409, "INVALID_TRANSITION", f"Cannot publish a post that is {post.status.value}")
     now = utcnow()
