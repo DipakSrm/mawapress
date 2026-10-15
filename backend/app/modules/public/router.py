@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import datetime
 from typing import Literal
@@ -5,6 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +17,7 @@ from app.modules.posts.models import Post, PostStatus, PostTranslation
 from app.modules.taxonomy.models import Category
 from app.modules.users.models import User
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/public", tags=["public"])
 CACHE_TTL_SECONDS = 60
 CACHE_CONTROL = "public, s-maxage=60, stale-while-revalidate=86400"
@@ -40,8 +43,12 @@ def post_cache_key(locale: str, slug: str) -> str:
 
 async def invalidate_post_cache(redis: Redis, post: Post) -> None:
     keys = [post_cache_key(t.locale, t.slug) for t in post.translations]
-    if keys:
+    if not keys:
+        return
+    try:
         await redis.delete(*keys)
+    except RedisError:
+        logger.warning("Cache invalidation failed; stale entries expire via TTL", exc_info=True)
 
 
 @router.get("/posts/{locale}/{slug}", response_model=PublicPostOut)
@@ -54,7 +61,12 @@ async def get_public_post(
 ) -> PublicPostOut:
     response.headers["Cache-Control"] = CACHE_CONTROL
     key = post_cache_key(locale, slug)
-    if cached := await redis.get(key):
+    cached = None
+    try:
+        cached = await redis.get(key)
+    except RedisError:
+        logger.warning("Cache read failed; serving from database", exc_info=True)
+    if cached:
         response.headers["X-Cache"] = "HIT"
         return PublicPostOut.model_validate_json(cached)
 
@@ -82,6 +94,9 @@ async def get_public_post(
         seo=tr.seo_auto,
         alternates={t.locale: t.slug for t in post.translations if t.locale != tr.locale},
     )
-    await redis.set(key, out.model_dump_json(), ex=CACHE_TTL_SECONDS)
+    try:
+        await redis.set(key, out.model_dump_json(), ex=CACHE_TTL_SECONDS)
+    except RedisError:
+        logger.warning("Cache write failed; response not cached", exc_info=True)
     response.headers["X-Cache"] = "MISS"
     return out

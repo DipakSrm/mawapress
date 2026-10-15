@@ -1,3 +1,9 @@
+from httpx import ASGITransport, AsyncClient
+from redis.exceptions import ConnectionError as RedisConnectionError
+
+from app.core.cache import get_redis
+from app.db.session import get_session
+from app.main import create_app
 from app.modules.users.models import Role
 from tests.factories import auth_header, make_category, make_user
 
@@ -60,3 +66,38 @@ async def test_editing_published_post_invalidates_cache(client, session):
     r = await client.get("/api/public/posts/ne/badhi-samachar")
     assert r.headers["x-cache"] == "MISS"
     assert r.json()["title"] == "विराटनगरमा भीषण बाढी"
+
+
+class DownRedis:
+    async def get(self, *args, **kwargs):
+        raise RedisConnectionError("redis down")
+
+    set = delete = get
+
+
+async def down_client(session):
+    app = create_app()
+    app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[get_redis] = lambda: DownRedis()
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def test_public_get_survives_redis_outage(client, session):
+    await published_post(client, session)
+    async with await down_client(session) as down:
+        r = await down.get("/api/public/posts/ne/badhi-samachar")
+    assert r.status_code == 200
+    assert r.json()["title"] == "बाढी समाचार"
+    assert r.headers["x-cache"] == "MISS"
+
+
+async def test_patch_survives_redis_outage(client, session):
+    editor, published = await published_post(client, session)
+    async with await down_client(session) as down:
+        r = await down.patch(
+            f"/api/posts/{published['id']}",
+            json={"locale": "ne", "title": "विराटनगरमा भीषण बाढी"},
+            headers={**auth_header(editor), "If-Match": published["updated_at"]},
+        )
+    assert r.status_code == 200
+    assert r.json()["translations"][0]["title"] == "विराटनगरमा भीषण बाढी"
