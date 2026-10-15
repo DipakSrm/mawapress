@@ -11,7 +11,7 @@ from app.modules.auth.deps import ROLE_RANK, require_role
 from app.modules.posts import service
 from app.modules.posts.models import Post
 from app.modules.posts.schemas import PostCreate, PostOut, PostUpdate
-from app.modules.public.router import invalidate_post_cache
+from app.modules.public.service import invalidate_post_cache
 from app.modules.users.models import Role, User
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])

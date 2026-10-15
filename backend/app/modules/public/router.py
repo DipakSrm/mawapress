@@ -14,13 +14,12 @@ from app.core.cache import get_redis
 from app.core.errors import AppError
 from app.db.session import get_session
 from app.modules.posts.models import Post, PostStatus, PostTranslation
+from app.modules.public.service import CACHE_CONTROL, CACHE_TTL_SECONDS, post_cache_key
 from app.modules.taxonomy.models import Category
 from app.modules.users.models import User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/public", tags=["public"])
-CACHE_TTL_SECONDS = 60
-CACHE_CONTROL = "public, s-maxage=60, stale-while-revalidate=86400"
 
 
 class PublicPostOut(BaseModel):
@@ -35,20 +34,6 @@ class PublicPostOut(BaseModel):
     updated_at: datetime
     seo: dict
     alternates: dict[str, str]
-
-
-def post_cache_key(locale: str, slug: str) -> str:
-    return f"public:post:{locale}:{slug}"
-
-
-async def invalidate_post_cache(redis: Redis, post: Post) -> None:
-    keys = [post_cache_key(t.locale, t.slug) for t in post.translations]
-    if not keys:
-        return
-    try:
-        await redis.delete(*keys)
-    except RedisError:
-        logger.warning("Cache invalidation failed; stale entries expire via TTL", exc_info=True)
 
 
 @router.get("/posts/{locale}/{slug}", response_model=PublicPostOut)
