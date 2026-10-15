@@ -149,3 +149,51 @@ async def test_slug_is_frozen_after_publish(client, session):
     )
     assert r.json()["translations"][0]["title"] == "नयाँ शीर्षक"
     assert r.json()["translations"][0]["slug"] == "badhi-samachar"
+
+
+async def test_editing_published_post_writes_post_updated_event(client, session):
+    reporter = await make_user(session)
+    editor = await make_user(session, role=Role.editor)
+    cat = await make_category(session)
+    post = (await create(client, reporter, cat)).json()
+    published = (await client.post(f"/api/posts/{post['id']}/publish", headers=auth_header(editor))).json()
+    r = await client.patch(
+        f"/api/posts/{post['id']}",
+        json={"locale": "ne", "title": "नयाँ शीर्षक"},
+        headers={**auth_header(editor), "If-Match": published["updated_at"]},
+    )
+    assert r.status_code == 200
+    events = (await session.scalars(select(OutboxEvent).where(OutboxEvent.topic == "post.updated"))).all()
+    assert len(events) == 1
+    assert events[0].payload == {
+        "post_id": post["id"],
+        "category_id": cat.id,
+        "slugs": {"ne": "badhi-samachar"},
+    }
+
+
+async def test_editing_draft_writes_no_post_updated_event(client, session):
+    reporter = await make_user(session)
+    cat = await make_category(session)
+    post = (await create(client, reporter, cat)).json()
+    r = await client.patch(
+        f"/api/posts/{post['id']}",
+        json={"locale": "ne", "title": "नयाँ शीर्षक"},
+        headers={**auth_header(reporter), "If-Match": post["updated_at"]},
+    )
+    assert r.status_code == 200
+    events = (await session.scalars(select(OutboxEvent).where(OutboxEvent.topic == "post.updated"))).all()
+    assert events == []
+
+
+async def test_numbered_slug_stays_within_80_chars(client, session):
+    reporter = await make_user(session)
+    cat = await make_category(session)
+    for title in ("abcdefghi " * 7 + "abcdefghi", "a" * 79):
+        first = (await create(client, reporter, cat, title=title)).json()["translations"][0]["slug"]
+        second = (await create(client, reporter, cat, title=title)).json()["translations"][0]["slug"]
+        third = (await create(client, reporter, cat, title=title)).json()["translations"][0]["slug"]
+        assert len(first) == 79
+        assert len(second) <= 80 and second.endswith("-2")
+        assert len(third) <= 80 and third.endswith("-3")
+        assert len({first, second, third}) == 3

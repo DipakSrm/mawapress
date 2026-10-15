@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -22,20 +22,47 @@ def _is_editor(user: User) -> bool:
     return ROLE_RANK[user.role] >= ROLE_RANK[Role.editor]
 
 
-async def unique_slug(session: AsyncSession, locale: str, base: str, exclude_id: int | None = None) -> str:
-    stmt = select(PostTranslation.slug).where(
-        PostTranslation.locale == locale,
-        or_(PostTranslation.slug == base, PostTranslation.slug.like(f"{base}-%")),
-    )
+MAX_SLUG_LEN = 80
+
+
+def _trim_base(base: str, max_len: int) -> str:
+    if len(base) <= max_len:
+        return base
+    cut = base[:max_len]
+    if "-" in cut:
+        cut = cut.rsplit("-", 1)[0]
+    return cut.rstrip("-") or base[:max_len]
+
+
+async def _slug_taken(session: AsyncSession, locale: str, slug: str, exclude_id: int | None) -> bool:
+    stmt = select(PostTranslation.id).where(PostTranslation.locale == locale, PostTranslation.slug == slug)
     if exclude_id is not None:
         stmt = stmt.where(PostTranslation.id != exclude_id)
-    taken = set((await session.scalars(stmt)).all())
-    if base not in taken:
+    return (await session.scalar(stmt.limit(1))) is not None
+
+
+async def unique_slug(session: AsyncSession, locale: str, base: str, exclude_id: int | None = None) -> str:
+    """Return base, or base-N trimmed so the result never exceeds MAX_SLUG_LEN."""
+    if not await _slug_taken(session, locale, base, exclude_id):
         return base
     n = 2
-    while f"{base}-{n}" in taken:
+    while True:
+        suffix = f"-{n}"
+        candidate = _trim_base(base, MAX_SLUG_LEN - len(suffix)) + suffix
+        if not await _slug_taken(session, locale, candidate, exclude_id):
+            return candidate
         n += 1
-    return f"{base}-{n}"
+
+
+def _post_event(topic: str, post: Post) -> OutboxEvent:
+    return OutboxEvent(
+        topic=topic,
+        payload={
+            "post_id": str(post.id),
+            "category_id": post.category_id,
+            "slugs": {t.locale: t.slug for t in post.translations},
+        },
+    )
 
 
 async def _refresh_all_seo(session: AsyncSession, post: Post) -> None:
@@ -148,6 +175,8 @@ async def update_post(session: AsyncSession, user: User, post_id: uuid.UUID, if_
         tr.seo_description = data.seo_description or None
 
     post.updated_at = utcnow()
+    if post.status == PostStatus.published:
+        session.add(_post_event("post.updated", post))
     return await _save(session, post)
 
 
@@ -170,12 +199,5 @@ async def publish_post(session: AsyncSession, post_id: uuid.UUID) -> Post:
     post.status = PostStatus.published
     post.published_at = post.published_at or now
     post.updated_at = now
-    session.add(OutboxEvent(
-        topic="post.published",
-        payload={
-            "post_id": str(post.id),
-            "category_id": post.category_id,
-            "slugs": {t.locale: t.slug for t in post.translations},
-        },
-    ))
+    session.add(_post_event("post.published", post))
     return await _save(session, post)
