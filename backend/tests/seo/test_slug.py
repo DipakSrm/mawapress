@@ -13,6 +13,10 @@ from app.modules.seo.slug import make_slug, transliterate
         ("बाढी २०८२", "badhi-2082"),
         ("Hello World!", "hello-world"),
         ("Café Nepal", "cafe-nepal"),
+        ("मोरङ, समाचार", "morang-samachar"),
+        ('"विराटनगर" समाचार', "biratnagar-samachar"),
+        ("Café,विराटनगर", "cafe-biratnagar"),
+        ("बाढी। समाचार", "badhi-samachar"),
     ],
 )
 def test_make_slug_examples(text, expected):

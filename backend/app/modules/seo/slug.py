@@ -42,10 +42,6 @@ class _Unit:
     suffix: str = ""
 
 
-def _is_devanagari(ch: str) -> bool:
-    return "ऀ" <= ch <= "ॿ"
-
-
 def _transliterate_word(word: str) -> str:
     units: list[_Unit] = []
     for ch in word:
@@ -77,11 +73,8 @@ def _transliterate_word(word: str) -> str:
 def transliterate(text: str) -> str:
     text = text.translate(DIGITS)
     parts = []
-    for token in re.split(r"(\s+)", text):
-        if any(_is_devanagari(c) for c in token):
-            parts.append(_transliterate_word(token))
-        else:
-            parts.append(unidecode(token))
+    for i, run in enumerate(re.split(r"([ऀ-ॣ०-ॿ]+)", text)):
+        parts.append(_transliterate_word(run) if i % 2 else unidecode(run))
     return "".join(parts)
 
 
