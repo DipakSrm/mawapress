@@ -4,6 +4,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from app.core.cache import get_redis
 from app.db.session import get_session
 from app.main import create_app
+from app.modules.public.service import post_cache_key
 from app.modules.users.models import Role
 from tests.factories import auth_header, auth_if_match, make_category, make_user
 
@@ -103,3 +104,105 @@ async def test_patch_survives_redis_outage(client, session):
         )
     assert r.status_code == 200
     assert r.json()["translations"][0]["title"] == "विराटनगरमा भीषण बाढी"
+
+
+async def draft_post(client, editor, cat, title="बाढी समाचार"):
+    r = await client.post(
+        "/api/posts",
+        json={"locale": "ne", "title": title, "content_json": doc("पानी"), "category_id": cat.id},
+        headers=auth_header(editor),
+    )
+    assert r.status_code == 201
+    return r.json()
+
+
+async def add_english(client, editor, post, title="Flood in Biratnagar"):
+    r = await client.patch(
+        f"/api/posts/{post['id']}",
+        json={"locale": "en", "title": title, "content_json": doc("It is raining")},
+        headers=auth_if_match(editor, post["updated_at"]),
+    )
+    assert r.status_code == 200
+    return r.json()
+
+
+async def test_en_locale_and_alternates_when_both_published(client, session):
+    editor = await make_user(session, role=Role.editor, name="Sita Rai")
+    cat = await make_category(session)
+    with_en = await add_english(client, editor, await draft_post(client, editor, cat))
+    published = await client.post(
+        f"/api/posts/{with_en['id']}/publish", headers=auth_if_match(editor, with_en["updated_at"])
+    )
+    assert published.status_code == 200
+
+    en = await client.get("/api/public/posts/en/flood-in-biratnagar")
+    assert en.status_code == 200
+    body = en.json()
+    assert body["locale"] == "en"
+    assert body["title"] == "Flood in Biratnagar"
+    assert body["content_html"] == "<p>It is raining</p>"
+    assert body["alternates"] == {"ne": "badhi-samachar"}
+    assert body["seo"]["hreflang"]["ne"].endswith("/ne/morang/badhi-samachar")
+    assert body["seo"]["hreflang"]["x-default"].endswith("/ne/morang/badhi-samachar")
+    assert body["seo"]["json_ld"][0]["inLanguage"] == "en"
+
+    ne = await client.get("/api/public/posts/ne/badhi-samachar")
+    assert ne.json()["alternates"] == {"en": "flood-in-biratnagar"}
+
+
+async def test_draft_translation_on_live_post_is_hidden(client, session):
+    editor, published = await published_post(client, session)
+    await add_english(client, editor, published)  # autosaved half translation on a live post
+
+    en = await client.get("/api/public/posts/en/flood-in-biratnagar")
+    assert en.status_code == 404
+    assert en.json()["error"]["code"] == "POST_NOT_FOUND"
+
+    ne = await client.get("/api/public/posts/ne/badhi-samachar")
+    assert ne.status_code == 200
+    assert ne.json()["alternates"] == {}
+    assert ne.json()["seo"]["hreflang"] == {}
+
+
+async def test_publishing_translation_invalidates_cached_sibling(client, session):
+    editor, published = await published_post(client, session)
+    with_en = await add_english(client, editor, published)
+    assert (await client.get("/api/public/posts/ne/badhi-samachar")).headers["x-cache"] == "MISS"
+    assert (await client.get("/api/public/posts/ne/badhi-samachar")).headers["x-cache"] == "HIT"
+
+    r = await client.post(
+        f"/api/posts/{published['id']}/translations/en/publish",
+        headers=auth_if_match(editor, with_en["updated_at"]),
+    )
+    assert r.status_code == 200
+
+    ne = await client.get("/api/public/posts/ne/badhi-samachar")
+    assert ne.headers["x-cache"] == "MISS"
+    assert ne.json()["alternates"] == {"en": "flood-in-biratnagar"}
+    en = await client.get("/api/public/posts/en/flood-in-biratnagar")
+    assert en.status_code == 200
+    assert en.json()["alternates"] == {"ne": "badhi-samachar"}
+
+
+async def test_publish_invalidates_public_cache(client, session, fake_redis):
+    editor = await make_user(session, role=Role.editor)
+    cat = await make_category(session)
+    post = await draft_post(client, editor, cat)
+    key = post_cache_key("ne", "badhi-samachar")
+    await fake_redis.set(key, "stale entry from an earlier publication")
+
+    r = await client.post(f"/api/posts/{post['id']}/publish", headers=auth_if_match(editor, post["updated_at"]))
+    assert r.status_code == 200
+    assert await fake_redis.get(key) is None
+
+    served = await client.get("/api/public/posts/ne/badhi-samachar")
+    assert served.headers["x-cache"] == "MISS"
+    assert served.json()["title"] == "बाढी समाचार"
+
+
+async def test_unknown_locale_is_404_envelope(client, session):
+    await published_post(client, session)
+    for locale in ("fr", "NE", "nep"):
+        r = await client.get(f"/api/public/posts/{locale}/badhi-samachar")
+        assert r.status_code == 404, locale
+        assert r.json()["error"]["code"] == "POST_NOT_FOUND"
