@@ -1,0 +1,63 @@
+import uuid
+
+from fastapi import APIRouter, Depends, Header
+from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.cache import get_redis
+from app.core.errors import AppError
+from app.db.session import get_session
+from app.modules.auth.deps import ROLE_RANK, require_role
+from app.modules.posts import service
+from app.modules.posts.models import Post
+from app.modules.posts.schemas import PostCreate, PostOut, PostUpdate
+from app.modules.public.service import invalidate_post_cache
+from app.modules.users.models import Role, User
+
+router = APIRouter(prefix="/api/posts", tags=["posts"])
+any_staff = require_role(Role.reporter)
+editors = require_role(Role.editor)
+
+
+@router.post("", response_model=PostOut, status_code=201)
+async def create_post(body: PostCreate, user: User = Depends(any_staff), session: AsyncSession = Depends(get_session)) -> Post:
+    return await service.create_post(session, user, body)
+
+
+@router.get("/{post_id}", response_model=PostOut)
+async def get_post(post_id: uuid.UUID, user: User = Depends(any_staff), session: AsyncSession = Depends(get_session)) -> Post:
+    post = await service.get_post(session, post_id)
+    if post.author_id != user.id and ROLE_RANK[user.role] < ROLE_RANK[Role.editor]:
+        raise AppError(403, "FORBIDDEN_ROLE", "You cannot view this post")
+    return post
+
+
+@router.patch("/{post_id}", response_model=PostOut)
+async def update_post(
+    post_id: uuid.UUID,
+    body: PostUpdate,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(any_staff),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Post:
+    post = await service.update_post(session, user, post_id, if_match, body)
+    await invalidate_post_cache(redis, post)
+    return post
+
+
+@router.post("/{post_id}/submit", response_model=PostOut)
+async def submit_post(post_id: uuid.UUID, user: User = Depends(any_staff), session: AsyncSession = Depends(get_session)) -> Post:
+    return await service.submit_post(session, user, post_id)
+
+
+@router.post("/{post_id}/publish", response_model=PostOut)
+async def publish_post(
+    post_id: uuid.UUID,
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Post:
+    post = await service.publish_post(session, post_id)
+    await invalidate_post_cache(redis, post)
+    return post

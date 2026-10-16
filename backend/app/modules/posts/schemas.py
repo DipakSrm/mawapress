@@ -1,0 +1,49 @@
+import uuid
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.modules.posts.models import PostStatus
+
+Locale = Literal["ne", "en"]
+
+
+class PostCreate(BaseModel):
+    locale: Locale
+    title: str = Field(min_length=1, max_length=300)
+    content_json: dict
+    category_id: int
+
+
+class PostUpdate(BaseModel):
+    locale: Locale
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    content_json: dict | None = None
+    seo_title: str | None = Field(default=None, max_length=120)
+    seo_description: str | None = Field(default=None, max_length=320)
+
+
+class TranslationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    locale: str
+    title: str
+    slug: str
+    content_json: dict
+    content_html: str
+    seo_title: str | None
+    seo_description: str | None
+    seo_auto: dict
+
+
+class PostOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: PostStatus
+    author_id: uuid.UUID
+    category_id: int
+    published_at: datetime | None
+    updated_at: datetime
+    translations: list[TranslationOut]
