@@ -19,7 +19,7 @@ from app.modules.posts.schemas import (
     PostUpdate,
     TranslationSummary,
 )
-from app.modules.public.service import invalidate_post_cache
+from app.modules.public.service import invalidate_public
 from app.modules.users.models import Role, User
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
@@ -86,7 +86,7 @@ async def update_post(
 ) -> Post:
     post, public_changed = await service.update_post(session, user, post_id, if_match, body)
     if public_changed:
-        await invalidate_post_cache(redis, post)
+        await invalidate_public(redis, post)
     return post
 
 
@@ -104,7 +104,7 @@ async def publish_post(
     redis: Redis = Depends(get_redis),
 ) -> Post:
     post = await service.publish_post(session, post_id, if_match)
-    await invalidate_post_cache(redis, post)
+    await invalidate_public(redis, post)
     return post
 
 
@@ -118,5 +118,5 @@ async def publish_translation(
     redis: Redis = Depends(get_redis),
 ) -> Post:
     post = await service.publish_translation(session, post_id, locale, if_match)
-    await invalidate_post_cache(redis, post)
+    await invalidate_public(redis, post)
     return post

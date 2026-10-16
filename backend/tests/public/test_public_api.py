@@ -1,12 +1,6 @@
-from httpx import ASGITransport, AsyncClient
-from redis.exceptions import ConnectionError as RedisConnectionError
-
-from app.core.cache import get_redis
-from app.db.session import get_session
-from app.main import create_app
 from app.modules.public.service import post_cache_key
 from app.modules.users.models import Role
-from tests.factories import auth_header, auth_if_match, make_category, make_user
+from tests.factories import auth_header, auth_if_match, down_client, make_category, make_user
 
 
 def doc(text: str) -> dict:
@@ -69,20 +63,6 @@ async def test_editing_published_post_invalidates_cache(client, session):
     r = await client.get("/api/public/posts/ne/badhi-samachar")
     assert r.headers["x-cache"] == "MISS"
     assert r.json()["title"] == "विराटनगरमा भीषण बाढी"
-
-
-class DownRedis:
-    async def get(self, *args, **kwargs):
-        raise RedisConnectionError("redis down")
-
-    set = delete = get
-
-
-async def down_client(session):
-    app = create_app()
-    app.dependency_overrides[get_session] = lambda: session
-    app.dependency_overrides[get_redis] = lambda: DownRedis()
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 async def test_public_get_survives_redis_outage(client, session):

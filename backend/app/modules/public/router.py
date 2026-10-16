@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import select
@@ -13,14 +13,25 @@ from app.core.cache import get_redis
 from app.core.errors import AppError
 from app.db.session import get_session
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
-from app.modules.public.service import CACHE_CONTROL, CACHE_TTL_SECONDS, post_cache_key
+from app.modules.public.service import (
+    CACHE_CONTROL,
+    CACHE_TTL_SECONDS,
+    cache_get,
+    cache_set,
+    categories_cache_key,
+    feed_generation,
+    post_cache_key,
+)
+from app.modules.taxonomy import service as taxonomy_service
 from app.modules.taxonomy.models import Category
+from app.modules.taxonomy.schemas import CategoryNode
 from app.modules.users.models import User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/public", tags=["public"])
 
 SUPPORTED_LOCALES = ("ne", "en")
+_category_tree = TypeAdapter(list[CategoryNode])
 
 
 class PublicPostOut(BaseModel):
@@ -98,3 +109,23 @@ async def get_public_post(
         logger.warning("Cache write failed; response not cached", exc_info=True)
     response.headers["X-Cache"] = "MISS"
     return out
+
+
+@router.get("/categories", response_model=list[CategoryNode])
+async def public_categories(
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> list[CategoryNode]:
+    response.headers["Cache-Control"] = CACHE_CONTROL
+    gen = await feed_generation(redis)
+    key = categories_cache_key(gen) if gen is not None else None
+    cached = await cache_get(redis, key) if key else None
+    if cached:
+        response.headers["X-Cache"] = "HIT"
+        return _category_tree.validate_json(cached)
+    tree = await taxonomy_service.category_tree(session)
+    if key:
+        await cache_set(redis, key, _category_tree.dump_json(tree).decode())
+    response.headers["X-Cache"] = "MISS"
+    return tree
