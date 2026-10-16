@@ -10,7 +10,7 @@ from app.db.session import get_session
 from app.modules.auth.deps import ROLE_RANK, require_role
 from app.modules.posts import service
 from app.modules.posts.models import Post
-from app.modules.posts.schemas import PostCreate, PostOut, PostUpdate
+from app.modules.posts.schemas import Locale, PostCreate, PostOut, PostUpdate
 from app.modules.public.service import invalidate_post_cache
 from app.modules.users.models import Role, User
 
@@ -60,5 +60,19 @@ async def publish_post(
     redis: Redis = Depends(get_redis),
 ) -> Post:
     post = await service.publish_post(session, post_id, if_match)
+    await invalidate_post_cache(redis, post)
+    return post
+
+
+@router.post("/{post_id}/translations/{locale}/publish", response_model=PostOut)
+async def publish_translation(
+    post_id: uuid.UUID,
+    locale: Locale,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Post:
+    post = await service.publish_translation(session, post_id, locale, if_match)
     await invalidate_post_cache(redis, post)
     return post

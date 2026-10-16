@@ -75,6 +75,7 @@ async def test_update_requires_current_if_match(client, session):
 
 async def test_adding_english_translation_links_hreflang(client, session):
     reporter = await make_user(session)
+    editor = await make_user(session, role=Role.editor)
     cat = await make_category(session)
     post = (await create(client, reporter, cat)).json()
     r = await client.patch(
@@ -85,6 +86,12 @@ async def test_adding_english_translation_links_hreflang(client, session):
     assert r.status_code == 200
     ne, en = r.json()["translations"]
     assert en["slug"] == "flood-in-biratnagar"
+    assert ne["seo_auto"]["hreflang"] == {} and en["seo_auto"]["hreflang"] == {}  # nothing published yet
+
+    published = await client.post(
+        f"/api/posts/{post['id']}/publish", headers=auth_if_match(editor, r.json()["updated_at"])
+    )
+    ne, en = published.json()["translations"]
     assert set(ne["seo_auto"]["hreflang"]) == {"ne", "en", "x-default"}
     assert en["seo_auto"]["hreflang"]["ne"].endswith("/ne/morang/badhi-samachar")
 

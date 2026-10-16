@@ -10,7 +10,7 @@ from app.core.errors import AppError
 from app.db.base import utcnow
 from app.db.outbox import OutboxEvent
 from app.modules.auth.deps import ROLE_RANK
-from app.modules.posts.models import Post, PostStatus, PostTranslation
+from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
 from app.modules.posts.render import render_html
 from app.modules.posts.schemas import PostCreate, PostUpdate
 from app.modules.seo.generator import SeoInput, build_seo
@@ -77,7 +77,11 @@ async def _refresh_all_seo(session: AsyncSession, post: Post) -> None:
     author = await session.get(User, post.author_id)
     site_url = get_settings().site_url
     for tr in post.translations:
-        alternates = {t.locale: t.slug for t in post.translations if t.locale != tr.locale}
+        alternates = {
+            t.locale: t.slug
+            for t in post.translations
+            if t.locale != tr.locale and t.status == TranslationStatus.published
+        }
         meta = build_seo(
             SeoInput(
                 locale=tr.locale,
@@ -185,7 +189,7 @@ async def update_post(session: AsyncSession, user: User, post_id: uuid.UUID, if_
     else:
         if data.title is not None and data.title != tr.title:
             tr.title = data.title
-            if post.status != PostStatus.published:
+            if tr.status != TranslationStatus.published:
                 tr.slug = await unique_slug(session, tr.locale, make_slug(data.title), exclude_id=tr.id)
         if data.content_json is not None:
             tr.content_json = data.content_json
@@ -221,5 +225,27 @@ async def publish_post(session: AsyncSession, post_id: uuid.UUID, if_match: str 
     post.status = PostStatus.published
     post.published_at = post.published_at or now
     post.updated_at = now
+    for tr in post.translations:  # only the translations that exist right now
+        if tr.status != TranslationStatus.published:
+            tr.status = TranslationStatus.published
+            tr.published_at = now
     session.add(_post_event("post.published", post))
+    return await _save(session, post)
+
+
+async def publish_translation(session: AsyncSession, post_id: uuid.UUID, locale: str, if_match: str | None) -> Post:
+    post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
+    if post.status != PostStatus.published:
+        raise AppError(409, "INVALID_TRANSITION", "Publish the post before publishing a single translation")
+    tr = next((t for t in post.translations if t.locale == locale), None)
+    if tr is None:
+        raise AppError(404, "TRANSLATION_NOT_FOUND", f"Post has no '{locale}' translation")
+    if tr.status == TranslationStatus.published:
+        raise AppError(409, "INVALID_TRANSITION", f"The '{locale}' translation is already published")
+    now = utcnow()
+    tr.status = TranslationStatus.published
+    tr.published_at = now
+    post.updated_at = now
+    session.add(_post_event("post.updated", post))
     return await _save(session, post)

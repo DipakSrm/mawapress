@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.modules.posts.models import PostStatus
+from app.modules.posts.models import PostStatus, TranslationStatus
 
 Locale = Literal["ne", "en"]
 
@@ -30,6 +30,8 @@ class TranslationOut(BaseModel):
     locale: str
     title: str
     slug: str
+    status: TranslationStatus
+    published_at: datetime | None
     content_json: dict
     content_html: str
     seo_title: str | None
