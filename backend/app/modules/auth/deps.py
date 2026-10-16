@@ -14,17 +14,28 @@ ROLE_RANK = {Role.reporter: 1, Role.editor: 2, Role.admin: 3}
 _bearer = HTTPBearer(auto_error=False)
 
 
+def _user_id_from_token(token: str) -> uuid.UUID | None:
+    try:
+        claims = decode_access_token(token)
+    except jwt.PyJWTError:
+        return None
+    sub = claims.get("sub")
+    if not isinstance(sub, str):
+        return None
+    try:
+        return uuid.UUID(sub)
+    except ValueError:
+        return None
+
+
 async def current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: AsyncSession = Depends(get_session),
 ) -> User:
     if creds is None:
         raise AppError(401, "NOT_AUTHENTICATED", "Login required")
-    try:
-        claims = decode_access_token(creds.credentials)
-        user = await session.get(User, uuid.UUID(claims["sub"]))
-    except (jwt.PyJWTError, KeyError, ValueError):
-        user = None
+    user_id = _user_id_from_token(creds.credentials)
+    user = await session.get(User, user_id) if user_id is not None else None
     if user is None or not user.is_active:
         raise AppError(401, "INVALID_TOKEN", "Token is invalid or expired")
     return user

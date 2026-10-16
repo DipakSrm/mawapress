@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AppError
 from app.db.session import get_session
 from app.modules.auth.deps import current_user
-from app.modules.auth.security import create_access_token, verify_password
+from app.modules.auth.security import DUMMY_PASSWORD_HASH, create_access_token, verify_password
 from app.modules.users.models import Role, User
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -36,7 +36,10 @@ class MeOut(BaseModel):
 @router.post("/login", response_model=TokenOut)
 async def login(body: LoginIn, session: AsyncSession = Depends(get_session)) -> TokenOut:
     user = await session.scalar(select(User).where(User.email == body.email.lower()))
-    if user is None or not user.is_active or not verify_password(body.password, user.password_hash):
+    if user is None or not user.is_active:
+        verify_password(body.password, DUMMY_PASSWORD_HASH)  # same cost as a real check
+        raise AppError(401, "INVALID_CREDENTIALS", "Email or password is incorrect")
+    if not verify_password(body.password, user.password_hash):
         raise AppError(401, "INVALID_CREDENTIALS", "Email or password is incorrect")
     return TokenOut(access_token=create_access_token(user.id, user.role.value))
 
