@@ -1,7 +1,8 @@
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.modules.posts.models import Post, PostStatus, PostTranslation
+from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
+
 from app.modules.taxonomy.models import Category
 from app.modules.users.models import Role, User
 
@@ -48,3 +49,15 @@ async def test_same_slug_allowed_in_other_locale(session):
     user, cat = await _author_and_category(session)
     session.add_all([_post(user, cat, "ne", "same"), _post(user, cat, "en", "same")])
     await session.flush()
+
+
+async def test_new_translation_defaults_to_draft(session):
+    user, cat = await _author_and_category(session)
+    post = _post(user, cat, "ne", "naya")
+    session.add(post)
+    await session.flush()
+    session.expunge_all()
+
+    loaded = await session.get(Post, post.id)
+    assert loaded.translations[0].status == TranslationStatus.draft
+    assert loaded.translations[0].published_at is None
