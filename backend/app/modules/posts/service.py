@@ -17,6 +17,7 @@ from app.modules.posts.render import render_html
 from app.modules.posts.schemas import PostCreate, PostUpdate
 from app.modules.seo.generator import SeoInput, build_seo
 from app.modules.seo.slug import make_slug
+from app.modules.taxonomy import service as taxonomy_service
 from app.modules.taxonomy.models import Category
 from app.modules.users.models import Role, User
 
@@ -157,13 +158,14 @@ async def _flush_with_slug_retry(
 async def create_post(session: AsyncSession, author: User, data: PostCreate) -> Post:
     if await session.get(Category, data.category_id) is None:
         raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
+    tags = await taxonomy_service.get_tags(session, data.tag_ids)
     base = make_slug(data.title)
     content_html = render_html(data.content_json)
     post: Post
 
     async def assign() -> None:
         nonlocal post
-        post = Post(author_id=author.id, category_id=data.category_id, status=PostStatus.draft)
+        post = Post(author_id=author.id, category_id=data.category_id, status=PostStatus.draft, tags=list(tags))
         post.translations.append(
             PostTranslation(
                 locale=data.locale,
@@ -204,6 +206,7 @@ async def update_post(
     if not (_is_editor(user) or own_draft):
         raise AppError(403, "FORBIDDEN_ROLE", "You cannot edit this post")
     _check_version(post, if_match)
+    tags = await taxonomy_service.get_tags(session, data.tag_ids) if data.tag_ids is not None else None
 
     now = utcnow()
     tr = next((t for t in post.translations if t.locale == data.locale), None)
@@ -266,6 +269,8 @@ async def update_post(
         seo_changed = True
     if seo_changed:
         tr.updated_at = now
+    if tags is not None:
+        post.tags = tags
     post.updated_at = now
 
     if public_changed:

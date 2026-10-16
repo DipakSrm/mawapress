@@ -1,12 +1,12 @@
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.modules.posts.models import Post
 from app.modules.seo.slug import is_valid_slug, make_slug
-from app.modules.taxonomy.models import Category
-from app.modules.taxonomy.schemas import CategoryCreate, CategoryNode, CategoryUpdate
+from app.modules.taxonomy.models import Category, Tag
+from app.modules.taxonomy.schemas import CategoryCreate, CategoryNode, CategoryUpdate, TagCreate, TagUpdate
 
 MAX_CATEGORY_DEPTH = 3  # root = 1
 
@@ -140,3 +140,72 @@ async def category_tree(session: AsyncSession) -> list[CategoryNode]:
         else:
             nodes[c.parent_id].children.append(nodes[cid])
     return roots
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def list_tags(session: AsyncSession, q: str | None = None) -> list[Tag]:
+    stmt = select(Tag).order_by(Tag.name_en, Tag.id).limit(100)
+    q = q.strip() if q else None
+    if q:
+        pattern = f"%{_escape_like(q)}%"
+        stmt = stmt.where(or_(
+            Tag.name_en.ilike(pattern, escape="\\"),
+            Tag.name_ne.ilike(pattern, escape="\\"),
+            Tag.slug.ilike(pattern, escape="\\"),
+        ))
+    return list((await session.scalars(stmt)).all())
+
+
+async def get_tag(session: AsyncSession, tag_id: int) -> Tag:
+    tag = await session.get(Tag, tag_id)
+    if tag is None:
+        raise AppError(404, "TAG_NOT_FOUND", "Tag not found")
+    return tag
+
+
+async def get_tags(session: AsyncSession, ids: list[int]) -> list[Tag]:
+    """Load tags by id for a post. Unknown ids are a client error (422), never silently dropped."""
+    wanted = sorted(set(ids))
+    if not wanted:
+        return []
+    tags = list((await session.scalars(select(Tag).where(Tag.id.in_(wanted)).order_by(Tag.id))).all())
+    missing = sorted(set(wanted) - {t.id for t in tags})
+    if missing:
+        raise AppError(422, "TAG_NOT_FOUND", "Unknown tag ids", {"missing": missing})
+    return tags
+
+
+async def create_tag(session: AsyncSession, data: TagCreate) -> Tag:
+    slug = data.slug if data.slug is not None else make_slug(data.name_en)
+    if not is_valid_slug(slug):
+        raise _invalid_slug()
+    if await session.scalar(select(Tag.id).where(Tag.slug == slug)) is not None:
+        raise _slug_taken()
+    tag = Tag(slug=slug, name_ne=data.name_ne, name_en=data.name_en)
+    try:
+        async with session.begin_nested():
+            session.add(tag)
+            await session.flush()
+    except IntegrityError as exc:
+        raise _slug_taken() from exc
+    await session.commit()
+    return tag
+
+
+async def update_tag(session: AsyncSession, tag_id: int, data: TagUpdate) -> Tag:
+    tag = await get_tag(session, tag_id)
+    if data.name_ne is not None:
+        tag.name_ne = data.name_ne
+    if data.name_en is not None:
+        tag.name_en = data.name_en
+    await session.commit()
+    return tag
+
+
+async def delete_tag(session: AsyncSession, tag_id: int) -> None:
+    tag = await get_tag(session, tag_id)
+    await session.delete(tag)  # post_tags rows go with it (ON DELETE CASCADE)
+    await session.commit()

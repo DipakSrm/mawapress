@@ -1,12 +1,16 @@
 import uuid
 from datetime import datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text, UniqueConstraint, Uuid, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, utcnow
+
+if TYPE_CHECKING:
+    from app.modules.taxonomy.models import Tag
 
 
 class PostStatus(StrEnum):
@@ -42,6 +46,7 @@ class Post(Base):
     translations: Mapped[list["PostTranslation"]] = relationship(
         back_populates="post", lazy="selectin", cascade="all, delete-orphan", order_by="PostTranslation.id"
     )
+    tags: Mapped[list["Tag"]] = relationship(secondary="post_tags", lazy="selectin", order_by="Tag.id")
 
 
 class PostTranslation(Base):

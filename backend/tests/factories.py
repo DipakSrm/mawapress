@@ -8,7 +8,7 @@ from app.core.cache import get_redis
 from app.db.session import get_session
 from app.main import create_app
 from app.modules.auth.security import create_access_token, hash_password
-from app.modules.taxonomy.models import Category
+from app.modules.taxonomy.models import Category, Tag
 from app.modules.users.models import Role, User
 
 
@@ -46,6 +46,13 @@ async def make_category(
     session.add(cat)
     await session.flush()
     return cat
+
+
+async def make_tag(session: AsyncSession, slug: str = "flood", name_ne: str = "बाढी", name_en: str = "Flood") -> Tag:
+    tag = Tag(slug=slug, name_ne=name_ne, name_en=name_en)
+    session.add(tag)
+    await session.flush()
+    return tag
 
 
 def auth_header(user: User) -> dict[str, str]:

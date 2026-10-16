@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.modules.posts.models import PostStatus, TranslationStatus
+from app.modules.taxonomy.schemas import TagOut
 
 Locale = Literal["ne", "en"]
 
@@ -14,6 +15,7 @@ class PostCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     content_json: dict
     category_id: int
+    tag_ids: list[int] = Field(default_factory=list, max_length=20)
 
 
 class PostUpdate(BaseModel):
@@ -22,6 +24,7 @@ class PostUpdate(BaseModel):
     content_json: dict | None = None
     seo_title: str | None = Field(default=None, max_length=120)
     seo_description: str | None = Field(default=None, max_length=320)
+    tag_ids: list[int] | None = Field(default=None, max_length=20)  # None = unchanged, [] = clear
 
 
 class TranslationOut(BaseModel):
@@ -49,6 +52,7 @@ class PostOut(BaseModel):
     published_at: datetime | None
     updated_at: datetime
     translations: list[TranslationOut]
+    tags: list[TagOut]
 
 
 class TranslationSummary(BaseModel):

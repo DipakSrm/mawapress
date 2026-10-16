@@ -44,3 +44,29 @@ class CategoryOut(BaseModel):
 
 class CategoryNode(CategoryOut):
     children: list["CategoryNode"] = Field(default_factory=list)
+
+
+class TagCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name_ne: Text120
+    name_en: Text120
+    slug: SlugIn | None = None  # defaults to make_slug(name_en)
+
+
+class TagUpdate(BaseModel):
+    """The slug is immutable: tag pages (M4) are addressed by it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name_ne: Text120 | None = None
+    name_en: Text120 | None = None
+
+
+class TagOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    slug: str
+    name_ne: str
+    name_en: str
