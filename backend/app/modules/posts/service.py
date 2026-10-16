@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -249,3 +249,49 @@ async def publish_translation(session: AsyncSession, post_id: uuid.UUID, locale:
     post.updated_at = now
     session.add(_post_event("post.updated", post))
     return await _save(session, post)
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def list_posts(
+    session: AsyncSession,
+    user: User,
+    *,
+    status: PostStatus | None = None,
+    author_id: uuid.UUID | None = None,
+    category_id: int | None = None,
+    locale: str | None = None,
+    q: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> tuple[list[Post], int]:
+    conditions = []
+    if not _is_editor(user):
+        conditions.append(Post.author_id == user.id)  # reporters only ever see their own posts
+    if author_id is not None:
+        conditions.append(Post.author_id == author_id)
+    if status is not None:
+        conditions.append(Post.status == status)
+    if category_id is not None:
+        conditions.append(Post.category_id == category_id)
+
+    translation_conditions = []
+    if locale is not None:
+        translation_conditions.append(PostTranslation.locale == locale)
+    q = q.strip() if q else None
+    if q:
+        translation_conditions.append(PostTranslation.title.ilike(f"%{_escape_like(q)}%", escape="\\"))
+    if translation_conditions:
+        conditions.append(exists().where(PostTranslation.post_id == Post.id, *translation_conditions))
+
+    total = await session.scalar(select(func.count()).select_from(Post).where(*conditions))
+    posts = await session.scalars(
+        select(Post)
+        .where(*conditions)
+        .order_by(Post.updated_at.desc(), Post.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(posts.all()), total or 0

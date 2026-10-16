@@ -49,3 +49,31 @@ class PostOut(BaseModel):
     published_at: datetime | None
     updated_at: datetime
     translations: list[TranslationOut]
+
+
+class TranslationSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    locale: str
+    title: str
+    slug: str
+    status: TranslationStatus
+
+
+class PostSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: PostStatus
+    category_id: int
+    author_id: uuid.UUID
+    updated_at: datetime
+    published_at: datetime | None
+    translations: list[TranslationSummary]
+
+
+class PostListOut(BaseModel):
+    items: list[PostSummary]
+    total: int
+    limit: int
+    offset: int

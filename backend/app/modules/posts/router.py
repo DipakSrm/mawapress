@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Query
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,8 +9,8 @@ from app.core.errors import AppError
 from app.db.session import get_session
 from app.modules.auth.deps import ROLE_RANK, require_role
 from app.modules.posts import service
-from app.modules.posts.models import Post
-from app.modules.posts.schemas import Locale, PostCreate, PostOut, PostUpdate
+from app.modules.posts.models import Post, PostStatus
+from app.modules.posts.schemas import Locale, PostCreate, PostListOut, PostOut, PostSummary, PostUpdate
 from app.modules.public.service import invalidate_post_cache
 from app.modules.users.models import Role, User
 
@@ -22,6 +22,28 @@ editors = require_role(Role.editor)
 @router.post("", response_model=PostOut, status_code=201)
 async def create_post(body: PostCreate, user: User = Depends(any_staff), session: AsyncSession = Depends(get_session)) -> Post:
     return await service.create_post(session, user, body)
+
+
+@router.get("", response_model=PostListOut)
+async def list_posts(
+    status: PostStatus | None = None,
+    author_id: uuid.UUID | None = None,
+    category_id: int | None = None,
+    locale: Locale | None = None,
+    q: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(any_staff),
+    session: AsyncSession = Depends(get_session),
+) -> PostListOut:
+    posts, total = await service.list_posts(
+        session, user,
+        status=status, author_id=author_id, category_id=category_id, locale=locale, q=q,
+        limit=limit, offset=offset,
+    )
+    return PostListOut(
+        items=[PostSummary.model_validate(p) for p in posts], total=total, limit=limit, offset=offset
+    )
 
 
 @router.get("/{post_id}", response_model=PostOut)
