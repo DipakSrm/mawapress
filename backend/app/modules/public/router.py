@@ -83,8 +83,8 @@ async def get_public_post(
         content_html=tr.content_html,
         category_slug=category.slug,
         author_name=author.name,
-        published_at=post.published_at,
-        updated_at=post.updated_at,
+        published_at=tr.published_at or post.published_at,
+        updated_at=tr.updated_at,
         seo=tr.seo_auto,
         alternates={
             t.locale: t.slug

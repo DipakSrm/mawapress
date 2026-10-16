@@ -67,5 +67,6 @@ class PostTranslation(Base):
         server_default=TranslationStatus.draft.value,
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 
     post: Mapped[Post] = relationship(back_populates="translations")

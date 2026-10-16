@@ -10,13 +10,34 @@ from app.db.session import get_session
 from app.modules.auth.deps import ROLE_RANK, require_role
 from app.modules.posts import service
 from app.modules.posts.models import Post, PostStatus
-from app.modules.posts.schemas import Locale, PostCreate, PostListOut, PostOut, PostSummary, PostUpdate
+from app.modules.posts.schemas import (
+    Locale,
+    PostCreate,
+    PostListOut,
+    PostOut,
+    PostSummary,
+    PostUpdate,
+    TranslationSummary,
+)
 from app.modules.public.service import invalidate_post_cache
 from app.modules.users.models import Role, User
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
 any_staff = require_role(Role.reporter)
 editors = require_role(Role.editor)
+
+
+def _summary(post: Post, author_name: str) -> PostSummary:
+    return PostSummary(
+        id=post.id,
+        status=post.status,
+        category_id=post.category_id,
+        author_id=post.author_id,
+        author_name=author_name,
+        updated_at=post.updated_at,
+        published_at=post.published_at,
+        translations=[TranslationSummary.model_validate(t) for t in post.translations],
+    )
 
 
 @router.post("", response_model=PostOut, status_code=201)
@@ -42,7 +63,7 @@ async def list_posts(
         limit=limit, offset=offset,
     )
     return PostListOut(
-        items=[PostSummary.model_validate(p) for p in posts], total=total, limit=limit, offset=offset
+        items=[_summary(p, author_name) for p, author_name in posts], total=total, limit=limit, offset=offset
     )
 
 
@@ -63,8 +84,9 @@ async def update_post(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> Post:
-    post = await service.update_post(session, user, post_id, if_match, body)
-    await invalidate_post_cache(redis, post)
+    post, public_changed = await service.update_post(session, user, post_id, if_match, body)
+    if public_changed:
+        await invalidate_post_cache(redis, post)
     return post
 
 

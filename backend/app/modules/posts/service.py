@@ -1,5 +1,7 @@
 import uuid
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
+from typing import NamedTuple
 
 from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
@@ -91,8 +93,8 @@ async def _refresh_all_seo(session: AsyncSession, post: Post) -> None:
                 category_slug=category.slug,
                 category_name=category.name_ne if tr.locale == "ne" else category.name_en,
                 author_name=author.name,
-                published_at=post.published_at,
-                modified_at=post.updated_at,
+                published_at=tr.published_at or post.published_at,
+                modified_at=tr.updated_at,
                 seo_title=tr.seo_title,
                 seo_description=tr.seo_description,
                 alternate_slugs=alternates,
@@ -124,35 +126,57 @@ async def _get_post_for_update(session: AsyncSession, post_id: uuid.UUID) -> Pos
     return post
 
 
+async def _flush_with_slug_retry(
+    session: AsyncSession,
+    assign: Callable[[], Awaitable[None]],
+    *,
+    refresh_on_conflict: Sequence[object] = (),
+) -> None:
+    """Run assign() (which picks a slug and stages the row) and flush it inside a SAVEPOINT.
+
+    unique_slug checks committed rows; a concurrent request can still win the race between
+    our check and our INSERT/UPDATE. The SAVEPOINT lets us retry with a fresh check. A savepoint
+    rollback expires the objects it touched, so persistent ones listed in refresh_on_conflict are
+    reloaded before the next attempt.
+    """
+    for _ in range(SLUG_RETRY_ATTEMPTS):
+        try:
+            async with session.begin_nested():
+                await assign()
+                await session.flush()
+        except IntegrityError as exc:
+            if not _is_slug_conflict(exc):
+                raise
+            for obj in refresh_on_conflict:
+                await session.refresh(obj)
+            continue
+        return
+    raise AppError(409, "SLUG_TAKEN", "Could not allocate a unique slug; please retry")
+
+
 async def create_post(session: AsyncSession, author: User, data: PostCreate) -> Post:
     if await session.get(Category, data.category_id) is None:
         raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
     base = make_slug(data.title)
     content_html = render_html(data.content_json)
-    for _ in range(SLUG_RETRY_ATTEMPTS):
-        # unique_slug checks committed rows; a concurrent create can still win the race
-        # between our check and our INSERT. The SAVEPOINT lets us retry with a fresh check.
-        slug = await unique_slug(session, data.locale, base)
+    post: Post
+
+    async def assign() -> None:
+        nonlocal post
         post = Post(author_id=author.id, category_id=data.category_id, status=PostStatus.draft)
         post.translations.append(
             PostTranslation(
                 locale=data.locale,
                 title=data.title,
-                slug=slug,
+                slug=await unique_slug(session, data.locale, base),
                 content_json=data.content_json,
                 content_html=content_html,
             )
         )
-        try:
-            async with session.begin_nested():
-                session.add(post)
-                await session.flush()
-        except IntegrityError as exc:
-            if not _is_slug_conflict(exc):
-                raise
-            continue
-        return await _save(session, post)
-    raise AppError(409, "SLUG_TAKEN", "Could not allocate a unique slug; please retry")
+        session.add(post)
+
+    await _flush_with_slug_retry(session, assign)
+    return await _save(session, post)
 
 
 def _check_version(post: Post, if_match: str | None) -> None:
@@ -167,42 +191,86 @@ def _check_version(post: Post, if_match: str | None) -> None:
                        {"current_updated_at": post.updated_at.isoformat()})
 
 
-async def update_post(session: AsyncSession, user: User, post_id: uuid.UUID, if_match: str | None, data: PostUpdate) -> Post:
+class UpdateResult(NamedTuple):
+    post: Post
+    public_changed: bool  # True when a translation that is live on the public site was edited
+
+
+async def update_post(
+    session: AsyncSession, user: User, post_id: uuid.UUID, if_match: str | None, data: PostUpdate
+) -> UpdateResult:
     post = await _get_post_for_update(session, post_id)
     own_draft = post.author_id == user.id and post.status == PostStatus.draft
     if not (_is_editor(user) or own_draft):
         raise AppError(403, "FORBIDDEN_ROLE", "You cannot edit this post")
     _check_version(post, if_match)
 
+    now = utcnow()
     tr = next((t for t in post.translations if t.locale == data.locale), None)
+    public_changed = False
     if tr is None:
         if data.title is None or data.content_json is None:
             raise AppError(422, "TRANSLATION_INCOMPLETE", "A new translation needs title and content_json")
-        tr = PostTranslation(
-            locale=data.locale,
-            title=data.title,
-            slug=await unique_slug(session, data.locale, make_slug(data.title)),
-            content_json=data.content_json,
-            content_html=render_html(data.content_json),
-        )
+        title, content_json = data.title, data.content_json
+        content_html = render_html(content_json)
+        new_tr: PostTranslation
+
+        async def assign_new() -> None:
+            nonlocal new_tr
+            # Attached by post_id (not through post.translations) so a rolled-back attempt
+            # leaves the post's collection untouched.
+            new_tr = PostTranslation(
+                post_id=post.id,
+                locale=data.locale,
+                title=title,
+                slug=await unique_slug(session, data.locale, make_slug(title)),
+                content_json=content_json,
+                content_html=content_html,
+            )
+            session.add(new_tr)
+
+        post.updated_at = now
+        await _flush_with_slug_retry(session, assign_new)
+        tr = new_tr
         post.translations.append(tr)
     else:
+        # Only an already-published translation of a live post is visible to readers.
+        public_changed = post.status == PostStatus.published and tr.status == TranslationStatus.published
+        changed = False
+        retitle_draft = False
         if data.title is not None and data.title != tr.title:
             tr.title = data.title
-            if tr.status != TranslationStatus.published:
-                tr.slug = await unique_slug(session, tr.locale, make_slug(data.title), exclude_id=tr.id)
-        if data.content_json is not None:
+            changed = True
+            retitle_draft = tr.status != TranslationStatus.published
+        if data.content_json is not None and data.content_json != tr.content_json:
             tr.content_json = data.content_json
             tr.content_html = render_html(data.content_json)
-    if "seo_title" in data.model_fields_set:
-        tr.seo_title = data.seo_title or None
-    if "seo_description" in data.model_fields_set:
-        tr.seo_description = data.seo_description or None
+            changed = True
+        if changed:
+            tr.updated_at = now
+        post.updated_at = now
+        await session.flush()
+        if retitle_draft:
+            tr_id, locale, title = tr.id, tr.locale, tr.title
 
-    post.updated_at = utcnow()
-    if post.status == PostStatus.published:
+            async def assign_retitle() -> None:
+                tr.slug = await unique_slug(session, locale, make_slug(title), exclude_id=tr_id)
+
+            await _flush_with_slug_retry(session, assign_retitle, refresh_on_conflict=[tr])
+    seo_changed = False
+    if "seo_title" in data.model_fields_set and (data.seo_title or None) != tr.seo_title:
+        tr.seo_title = data.seo_title or None
+        seo_changed = True
+    if "seo_description" in data.model_fields_set and (data.seo_description or None) != tr.seo_description:
+        tr.seo_description = data.seo_description or None
+        seo_changed = True
+    if seo_changed:
+        tr.updated_at = now
+    post.updated_at = now
+
+    if public_changed:
         session.add(_post_event("post.updated", post))
-    return await _save(session, post)
+    return UpdateResult(await _save(session, post), public_changed)
 
 
 async def submit_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> Post:
@@ -266,7 +334,7 @@ async def list_posts(
     q: str | None = None,
     limit: int = 20,
     offset: int = 0,
-) -> tuple[list[Post], int]:
+) -> tuple[list[tuple[Post, str]], int]:
     conditions = []
     if not _is_editor(user):
         conditions.append(Post.author_id == user.id)  # reporters only ever see their own posts
@@ -287,11 +355,12 @@ async def list_posts(
         conditions.append(exists().where(PostTranslation.post_id == Post.id, *translation_conditions))
 
     total = await session.scalar(select(func.count()).select_from(Post).where(*conditions))
-    posts = await session.scalars(
-        select(Post)
+    rows = await session.execute(
+        select(Post, User.name)
+        .join(User, User.id == Post.author_id)
         .where(*conditions)
         .order_by(Post.updated_at.desc(), Post.id.desc())
         .limit(limit)
         .offset(offset)
     )
-    return list(posts.all()), total or 0
+    return [(post, author_name) for post, author_name in rows.all()], total or 0

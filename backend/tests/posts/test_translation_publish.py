@@ -82,7 +82,7 @@ async def test_translation_added_to_live_post_stays_draft_until_published(client
     events = (await session.scalars(
         select(OutboxEvent).where(OutboxEvent.topic == "post.updated").order_by(OutboxEvent.id)
     )).all()
-    assert len(events) == 2  # one for the PATCH on the live post, one for the translation publish
+    assert len(events) == 1  # only the translation publish: adding a draft translation is invisible to readers
     assert events[-1].payload["slugs"] == {"ne": "badhi-samachar", "en": "flood-in-biratnagar"}
 
 

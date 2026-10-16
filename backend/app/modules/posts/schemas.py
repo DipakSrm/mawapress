@@ -67,6 +67,7 @@ class PostSummary(BaseModel):
     status: PostStatus
     category_id: int
     author_id: uuid.UUID
+    author_name: str
     updated_at: datetime
     published_at: datetime | None
     translations: list[TranslationSummary]

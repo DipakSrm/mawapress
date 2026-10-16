@@ -63,11 +63,14 @@ async def test_editor_sees_all_newest_updated_first(client, session):
 
 
 async def test_items_are_compact_summaries(client, session):
-    alice = await make_user(session)
+    alice = await make_user(session, name="Alice Rai")
     cat = await make_category(session)
     await create(client, alice, cat)
     item = (await list_posts(client, alice))["items"][0]
-    assert set(item) == {"id", "status", "category_id", "author_id", "updated_at", "published_at", "translations"}
+    assert set(item) == {
+        "id", "status", "category_id", "author_id", "author_name", "updated_at", "published_at", "translations"
+    }
+    assert item["author_name"] == "Alice Rai"
     assert item["translations"] == [
         {"locale": "ne", "title": "बाढी समाचार", "slug": "badhi-samachar", "status": "draft"}
     ]
