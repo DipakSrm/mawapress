@@ -1,11 +1,9 @@
-import logging
 import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, TypeAdapter
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +13,8 @@ from app.db.session import get_session
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
 from app.modules.public.service import (
     CACHE_CONTROL,
-    CACHE_TTL_SECONDS,
+    NEGATIVE_TTL_SECONDS,
+    NOT_FOUND_MARKER,
     cache_get,
     cache_set,
     categories_cache_key,
@@ -27,7 +26,6 @@ from app.modules.taxonomy.models import Category
 from app.modules.taxonomy.schemas import CategoryNode
 from app.modules.users.models import User
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/public", tags=["public"])
 
 SUPPORTED_LOCALES = ("ne", "en")
@@ -48,6 +46,10 @@ class PublicPostOut(BaseModel):
     alternates: dict[str, str]
 
 
+def _post_not_found() -> AppError:
+    return AppError(404, "POST_NOT_FOUND", "Post not found")
+
+
 @router.get("/posts/{locale}/{slug}", response_model=PublicPostOut)
 async def get_public_post(
     locale: str,
@@ -58,14 +60,12 @@ async def get_public_post(
 ) -> PublicPostOut:
     # An unknown locale is just a page that does not exist: same 404 as a missing slug.
     if locale not in SUPPORTED_LOCALES:
-        raise AppError(404, "POST_NOT_FOUND", "Post not found")
+        raise _post_not_found()
     response.headers["Cache-Control"] = CACHE_CONTROL
     key = post_cache_key(locale, slug)
-    cached = None
-    try:
-        cached = await redis.get(key)
-    except RedisError:
-        logger.warning("Cache read failed; serving from database", exc_info=True)
+    cached = await cache_get(redis, key)
+    if cached == NOT_FOUND_MARKER:
+        raise _post_not_found()
     if cached:
         response.headers["X-Cache"] = "HIT"
         return PublicPostOut.model_validate_json(cached)
@@ -81,7 +81,8 @@ async def get_public_post(
         )
     )).first()
     if row is None:
-        raise AppError(404, "POST_NOT_FOUND", "Post not found")
+        await cache_set(redis, key, NOT_FOUND_MARKER, ttl=NEGATIVE_TTL_SECONDS)
+        raise _post_not_found()
     tr, post = row
     category = await session.get(Category, post.category_id)
     author = await session.get(User, post.author_id)
@@ -103,10 +104,7 @@ async def get_public_post(
             if t.locale != tr.locale and t.status == TranslationStatus.published
         },
     )
-    try:
-        await redis.set(key, out.model_dump_json(), ex=CACHE_TTL_SECONDS)
-    except RedisError:
-        logger.warning("Cache write failed; response not cached", exc_info=True)
+    await cache_set(redis, key, out.model_dump_json())
     response.headers["X-Cache"] = "MISS"
     return out
 

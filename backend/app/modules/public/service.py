@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 60
 CACHE_CONTROL = "public, s-maxage=60, stale-while-revalidate=86400"
+NEGATIVE_TTL_SECONDS = 30
+# Stored under a post key when the article does not exist. Every action that can make a slug
+# public (publish, translation publish, slug change) deletes that post's keys, marker included.
+NOT_FOUND_MARKER = "__404__"
 
 # Every feed key (home, category pages, the category tree) embeds the current value of this
 # counter. Invalidating all feeds is one INCR; the orphaned keys expire through their TTL.

@@ -17,6 +17,7 @@ from app.modules.posts.schemas import (
     PostOut,
     PostSummary,
     PostUpdate,
+    SendBackIn,
     TranslationSummary,
 )
 from app.modules.public.service import invalidate_public
@@ -118,5 +119,28 @@ async def publish_translation(
     redis: Redis = Depends(get_redis),
 ) -> Post:
     post = await service.publish_translation(session, post_id, locale, if_match)
+    await invalidate_public(redis, post)
+    return post
+
+
+@router.post("/{post_id}/send-back", response_model=PostOut)
+async def send_back_post(
+    post_id: uuid.UUID,
+    body: SendBackIn | None = None,
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+) -> Post:
+    return await service.send_back_post(session, user, post_id, body.note if body else None)
+
+
+@router.post("/{post_id}/unpublish", response_model=PostOut)
+async def unpublish_post(
+    post_id: uuid.UUID,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Post:
+    post = await service.unpublish_post(session, post_id, if_match)
     await invalidate_public(redis, post)
     return post
