@@ -54,10 +54,11 @@ async def submit_post(post_id: uuid.UUID, user: User = Depends(any_staff), sessi
 @router.post("/{post_id}/publish", response_model=PostOut)
 async def publish_post(
     post_id: uuid.UUID,
+    if_match: str | None = Header(default=None),
     user: User = Depends(editors),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> Post:
-    post = await service.publish_post(session, post_id)
+    post = await service.publish_post(session, post_id, if_match)
     await invalidate_post_cache(redis, post)
     return post

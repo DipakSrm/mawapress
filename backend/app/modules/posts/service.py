@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -23,6 +24,12 @@ def _is_editor(user: User) -> bool:
 
 
 MAX_SLUG_LEN = 80
+SLUG_RETRY_ATTEMPTS = 3
+SLUG_CONSTRAINT = "uq_translation_locale_slug"
+
+
+def _is_slug_conflict(exc: IntegrityError) -> bool:
+    return SLUG_CONSTRAINT in str(exc.orig)
 
 
 def _trim_base(base: str, max_len: int) -> str:
@@ -116,18 +123,32 @@ async def _get_post_for_update(session: AsyncSession, post_id: uuid.UUID) -> Pos
 async def create_post(session: AsyncSession, author: User, data: PostCreate) -> Post:
     if await session.get(Category, data.category_id) is None:
         raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
-    post = Post(author_id=author.id, category_id=data.category_id, status=PostStatus.draft)
-    session.add(post)
-    post.translations.append(
-        PostTranslation(
-            locale=data.locale,
-            title=data.title,
-            slug=await unique_slug(session, data.locale, make_slug(data.title)),
-            content_json=data.content_json,
-            content_html=render_html(data.content_json),
+    base = make_slug(data.title)
+    content_html = render_html(data.content_json)
+    for _ in range(SLUG_RETRY_ATTEMPTS):
+        # unique_slug checks committed rows; a concurrent create can still win the race
+        # between our check and our INSERT. The SAVEPOINT lets us retry with a fresh check.
+        slug = await unique_slug(session, data.locale, base)
+        post = Post(author_id=author.id, category_id=data.category_id, status=PostStatus.draft)
+        post.translations.append(
+            PostTranslation(
+                locale=data.locale,
+                title=data.title,
+                slug=slug,
+                content_json=data.content_json,
+                content_html=content_html,
+            )
         )
-    )
-    return await _save(session, post)
+        try:
+            async with session.begin_nested():
+                session.add(post)
+                await session.flush()
+        except IntegrityError as exc:
+            if not _is_slug_conflict(exc):
+                raise
+            continue
+        return await _save(session, post)
+    raise AppError(409, "SLUG_TAKEN", "Could not allocate a unique slug; please retry")
 
 
 def _check_version(post: Post, if_match: str | None) -> None:
@@ -191,8 +212,9 @@ async def submit_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> 
     return await _save(session, post)
 
 
-async def publish_post(session: AsyncSession, post_id: uuid.UUID) -> Post:
+async def publish_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None) -> Post:
     post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
     if post.status not in (PostStatus.draft, PostStatus.in_review):
         raise AppError(409, "INVALID_TRANSITION", f"Cannot publish a post that is {post.status.value}")
     now = utcnow()

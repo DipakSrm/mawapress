@@ -37,3 +37,7 @@ async def make_category(session: AsyncSession, slug: str = "morang", name_ne: st
 
 def auth_header(user: User) -> dict[str, str]:
     return {"Authorization": f"Bearer {create_access_token(user.id, user.role.value)}"}
+
+
+def auth_if_match(user: User, updated_at: str) -> dict[str, str]:
+    return {**auth_header(user), "If-Match": updated_at}

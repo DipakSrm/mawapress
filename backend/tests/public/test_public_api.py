@@ -5,7 +5,7 @@ from app.core.cache import get_redis
 from app.db.session import get_session
 from app.main import create_app
 from app.modules.users.models import Role
-from tests.factories import auth_header, make_category, make_user
+from tests.factories import auth_header, auth_if_match, make_category, make_user
 
 
 def doc(text: str) -> dict:
@@ -20,7 +20,9 @@ async def published_post(client, session):
         json={"locale": "ne", "title": "बाढी समाचार", "content_json": doc("पानी"), "category_id": cat.id},
         headers=auth_header(editor),
     )).json()
-    published = (await client.post(f"/api/posts/{post['id']}/publish", headers=auth_header(editor))).json()
+    published = (await client.post(
+        f"/api/posts/{post['id']}/publish", headers=auth_if_match(editor, post["updated_at"])
+    )).json()
     return editor, published
 
 

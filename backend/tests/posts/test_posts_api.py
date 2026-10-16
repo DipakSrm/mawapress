@@ -1,8 +1,11 @@
+from datetime import datetime
+
 from sqlalchemy import select
 
 from app.db.outbox import OutboxEvent
+from app.modules.posts import service
 from app.modules.users.models import Role
-from tests.factories import auth_header, make_category, make_user
+from tests.factories import auth_header, auth_if_match, make_category, make_user
 
 
 def doc(text: str) -> dict:
@@ -126,7 +129,9 @@ async def test_submit_then_editor_publishes_and_outbox_written(client, session):
     denied = await client.post(f"/api/posts/{post['id']}/publish", headers=auth_header(reporter))
     assert denied.status_code == 403
 
-    published = await client.post(f"/api/posts/{post['id']}/publish", headers=auth_header(editor))
+    published = await client.post(
+        f"/api/posts/{post['id']}/publish", headers=auth_if_match(editor, submitted.json()["updated_at"])
+    )
     assert published.status_code == 200
     assert published.json()["status"] == "published"
     assert published.json()["published_at"] is not None
@@ -141,7 +146,9 @@ async def test_slug_is_frozen_after_publish(client, session):
     editor = await make_user(session, role=Role.editor)
     cat = await make_category(session)
     post = (await create(client, reporter, cat)).json()
-    published = (await client.post(f"/api/posts/{post['id']}/publish", headers=auth_header(editor))).json()
+    published = (await client.post(
+        f"/api/posts/{post['id']}/publish", headers=auth_if_match(editor, post["updated_at"])
+    )).json()
     r = await client.patch(
         f"/api/posts/{post['id']}",
         json={"locale": "ne", "title": "नयाँ शीर्षक"},
@@ -156,7 +163,9 @@ async def test_editing_published_post_writes_post_updated_event(client, session)
     editor = await make_user(session, role=Role.editor)
     cat = await make_category(session)
     post = (await create(client, reporter, cat)).json()
-    published = (await client.post(f"/api/posts/{post['id']}/publish", headers=auth_header(editor))).json()
+    published = (await client.post(
+        f"/api/posts/{post['id']}/publish", headers=auth_if_match(editor, post["updated_at"])
+    )).json()
     r = await client.patch(
         f"/api/posts/{post['id']}",
         json={"locale": "ne", "title": "नयाँ शीर्षक"},
@@ -197,3 +206,77 @@ async def test_numbered_slug_stays_within_80_chars(client, session):
         assert len(second) <= 80 and second.endswith("-2")
         assert len(third) <= 80 and third.endswith("-3")
         assert len({first, second, third}) == 3
+
+
+async def test_publish_requires_if_match(client, session):
+    reporter = await make_user(session)
+    editor = await make_user(session, role=Role.editor)
+    cat = await make_category(session)
+    post = (await create(client, reporter, cat)).json()
+    url = f"/api/posts/{post['id']}/publish"
+
+    missing = await client.post(url, headers=auth_header(editor))
+    assert missing.status_code == 428
+    assert missing.json()["error"]["code"] == "PRECONDITION_REQUIRED"
+
+    stale = await client.post(url, headers=auth_if_match(editor, "2020-01-01T00:00:00+00:00"))
+    assert stale.status_code == 412
+    assert stale.json()["error"]["code"] == "VERSION_CONFLICT"
+    # Pydantic emits "...Z", isoformat() emits "+00:00": compare as datetimes.
+    current = datetime.fromisoformat(stale.json()["error"]["details"]["current_updated_at"])
+    assert current == datetime.fromisoformat(post["updated_at"])
+
+    ok = await client.post(url, headers=auth_if_match(editor, post["updated_at"]))
+    assert ok.status_code == 200
+    assert ok.json()["status"] == "published"
+
+
+async def test_malformed_if_match_is_412(client, session):
+    reporter = await make_user(session)
+    cat = await make_category(session)
+    post = (await create(client, reporter, cat)).json()
+    for bad in ("not-a-date", "", '"'):
+        r = await client.patch(
+            f"/api/posts/{post['id']}",
+            json={"locale": "ne", "title": "मोरङ समाचार"},
+            headers=auth_if_match(reporter, bad),
+        )
+        assert r.status_code == 412, bad
+        assert r.json()["error"]["code"] == "VERSION_CONFLICT"
+
+
+async def test_concurrent_slug_collision_retries_with_next_suffix(client, session, monkeypatch):
+    reporter = await make_user(session)
+    cat = await make_category(session)
+    await create(client, reporter, cat)  # takes "badhi-samachar"
+    real_unique_slug = service.unique_slug
+    calls: list[str] = []
+
+    async def racing_unique_slug(session_, locale, base, exclude_id=None):
+        calls.append(base)
+        if len(calls) == 1:
+            return base  # simulate: the check ran before the other request's insert committed
+        return await real_unique_slug(session_, locale, base, exclude_id)
+
+    monkeypatch.setattr(service, "unique_slug", racing_unique_slug)
+    r = await create(client, reporter, cat)
+    assert r.status_code == 201
+    assert r.json()["translations"][0]["slug"] == "badhi-samachar-2"
+    assert calls == ["badhi-samachar", "badhi-samachar"]
+
+
+async def test_slug_collision_gives_409_after_three_attempts(client, session, monkeypatch):
+    reporter = await make_user(session)
+    cat = await make_category(session)
+    await create(client, reporter, cat)
+    calls: list[str] = []
+
+    async def always_taken(session_, locale, base, exclude_id=None):
+        calls.append(base)
+        return base
+
+    monkeypatch.setattr(service, "unique_slug", always_taken)
+    r = await create(client, reporter, cat)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "SLUG_TAKEN"
+    assert len(calls) == 3
