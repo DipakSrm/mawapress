@@ -12,7 +12,7 @@ from app.core.errors import AppError
 from app.db.base import utcnow
 from app.db.outbox import OutboxEvent
 from app.modules.auth.deps import ROLE_RANK
-from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
+from app.modules.posts.models import Post, PostRevision, PostStatus, PostTranslation, TranslationStatus
 from app.modules.posts.render import render_html
 from app.modules.posts.schemas import PostCreate, PostUpdate
 from app.modules.seo.generator import SeoInput, build_seo, plain_text
@@ -201,6 +201,13 @@ def _set_content(tr: PostTranslation, content_json: dict) -> None:
     tr.body_text = plain_text(tr.content_html)
 
 
+REVISION_FIELDS = ("title", "slug", "content_json", "seo_title", "seo_description", "excerpt")
+
+
+def _snapshot(tr: PostTranslation) -> dict:
+    return {field: getattr(tr, field) for field in REVISION_FIELDS}
+
+
 class UpdateResult(NamedTuple):
     post: Post
     public_changed: bool  # True when readers can see the change (live translation edited, or breaking flag on a live post)
@@ -222,6 +229,8 @@ async def update_post(
     now = utcnow()
     tr = next((t for t in post.translations if t.locale == data.locale), None)
     public_changed = False
+    # Readers have seen a published translation, so keep its current state before changing it.
+    before = _snapshot(tr) if tr is not None and tr.status == TranslationStatus.published else None
     if tr is None:
         if data.title is None or data.content_json is None:
             raise AppError(422, "TRANSLATION_INCOMPLETE", "A new translation needs title and content_json")
@@ -295,9 +304,47 @@ async def update_post(
         post.tags = tags
     post.updated_at = now
 
+    if before is not None and _snapshot(tr) != before:
+        session.add(PostRevision(post_id=post.id, locale=tr.locale, editor_id=user.id, **before))
     if public_changed:
         session.add(_post_event("post.updated", post))
     return UpdateResult(await _save(session, post), public_changed)
+
+
+async def list_revisions(
+    session: AsyncSession, user: User, post_id: uuid.UUID, locale: str | None = None
+) -> list[PostRevision]:
+    post = await get_post(session, post_id)
+    if post.author_id != user.id and not _is_editor(user):
+        raise AppError(403, "FORBIDDEN_ROLE", "You cannot view this post's revisions")
+    stmt = select(PostRevision).where(PostRevision.post_id == post_id)
+    if locale is not None:
+        stmt = stmt.where(PostRevision.locale == locale)
+    stmt = stmt.order_by(PostRevision.created_at.desc(), PostRevision.id.desc())
+    return list((await session.scalars(stmt)).all())
+
+
+async def restore_revision(
+    session: AsyncSession, user: User, post_id: uuid.UUID, rev_id: int, if_match: str | None
+) -> UpdateResult:
+    """Write a revision's content back as an ordinary versioned save.
+
+    update_post records the state being replaced as a new revision and emits post.updated if the
+    translation is live. The slug is not restored: it changes only through the explicit slug field,
+    which also writes redirects.
+    """
+    rev = await session.get(PostRevision, rev_id)
+    if rev is None or rev.post_id != post_id:
+        raise AppError(404, "REVISION_NOT_FOUND", "Revision not found")
+    data = PostUpdate(
+        locale=rev.locale,
+        title=rev.title,
+        content_json=rev.content_json,
+        seo_title=rev.seo_title or "",
+        seo_description=rev.seo_description or "",
+        excerpt=rev.excerpt or "",
+    )
+    return await update_post(session, user, post_id, if_match, data)
 
 
 async def submit_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> Post:

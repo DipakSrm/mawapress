@@ -90,3 +90,18 @@ class PostListOut(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class RevisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    locale: str
+    title: str
+    slug: str
+    content_json: dict
+    seo_title: str | None
+    seo_description: str | None
+    excerpt: str | None
+    editor_id: uuid.UUID
+    created_at: datetime

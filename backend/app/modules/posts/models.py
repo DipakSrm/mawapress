@@ -4,6 +4,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    BigInteger,
     Computed,
     DateTime,
     Enum,
@@ -106,3 +107,22 @@ class PostTranslation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 
     post: Mapped[Post] = relationship(back_populates="translations")
+
+
+class PostRevision(Base):
+    """Prior state of a published translation, saved before an edit replaced it."""
+
+    __tablename__ = "post_revisions"
+    __table_args__ = (Index("ix_post_revisions_post_id_created_at", "post_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    post_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"))
+    locale: Mapped[str] = mapped_column(String(2))
+    title: Mapped[str] = mapped_column(String(300))
+    slug: Mapped[str] = mapped_column(String(100))
+    content_json: Mapped[dict] = mapped_column(JSONB)
+    seo_title: Mapped[str | None] = mapped_column(String(120))
+    seo_description: Mapped[str | None] = mapped_column(String(320))
+    excerpt: Mapped[str | None] = mapped_column(String(300))
+    editor_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))  # whose save replaced this state
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())

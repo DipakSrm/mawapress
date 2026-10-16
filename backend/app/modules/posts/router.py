@@ -17,6 +17,7 @@ from app.modules.posts.schemas import (
     PostOut,
     PostSummary,
     PostUpdate,
+    RevisionOut,
     SendBackIn,
     TranslationSummary,
 )
@@ -143,4 +144,29 @@ async def unpublish_post(
 ) -> Post:
     post = await service.unpublish_post(session, post_id, if_match)
     await invalidate_public(redis, post)
+    return post
+
+
+@router.get("/{post_id}/revisions", response_model=list[RevisionOut])
+async def list_revisions(
+    post_id: uuid.UUID,
+    locale: Locale | None = None,
+    user: User = Depends(any_staff),
+    session: AsyncSession = Depends(get_session),
+):
+    return await service.list_revisions(session, user, post_id, locale)
+
+
+@router.post("/{post_id}/revisions/{rev_id}/restore", response_model=PostOut)
+async def restore_revision(
+    post_id: uuid.UUID,
+    rev_id: int,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Post:
+    post, public_changed = await service.restore_revision(session, user, post_id, rev_id, if_match)
+    if public_changed:
+        await invalidate_public(redis, post)
     return post
