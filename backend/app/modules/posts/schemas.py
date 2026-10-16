@@ -29,6 +29,8 @@ class PostUpdate(BaseModel):
     seo_title: str | None = Field(default=None, max_length=120)
     seo_description: str | None = Field(default=None, max_length=320)
     tag_ids: list[int] | None = Field(default=None, max_length=20)  # None = unchanged, [] = clear
+    excerpt: str | None = Field(default=None, max_length=300)  # "" clears the override
+    is_breaking: bool | None = None  # editor+ only
 
 
 class TranslationOut(BaseModel):
@@ -43,6 +45,7 @@ class TranslationOut(BaseModel):
     content_html: str
     seo_title: str | None
     seo_description: str | None
+    excerpt: str | None
     seo_auto: dict
 
 
@@ -51,6 +54,7 @@ class PostOut(BaseModel):
 
     id: uuid.UUID
     status: PostStatus
+    is_breaking: bool
     author_id: uuid.UUID
     category_id: int
     published_at: datetime | None

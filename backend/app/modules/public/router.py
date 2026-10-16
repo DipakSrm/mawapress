@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, TypeAdapter
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -21,6 +21,8 @@ from app.modules.public.service import (
     feed_generation,
     post_cache_key,
 )
+from app.modules.public.schemas import CardPage
+from app.modules.public.search import search_posts
 from app.modules.taxonomy import service as taxonomy_service
 from app.modules.taxonomy.models import Category
 from app.modules.taxonomy.schemas import CategoryNode
@@ -30,6 +32,12 @@ router = APIRouter(prefix="/api/public", tags=["public"])
 
 SUPPORTED_LOCALES = ("ne", "en")
 _category_tree = TypeAdapter(list[CategoryNode])
+
+
+def _require_locale(locale: str) -> None:
+    # Public routes treat an unknown locale as a page that does not exist (M2a1 ruling).
+    if locale not in SUPPORTED_LOCALES:
+        raise AppError(404, "LOCALE_NOT_FOUND", "Unknown locale")
 
 
 class PublicPostOut(BaseModel):
@@ -127,3 +135,21 @@ async def public_categories(
         await cache_set(redis, key, _category_tree.dump_json(tree).decode())
     response.headers["X-Cache"] = "MISS"
     return tree
+
+
+@router.get("/search", response_model=CardPage)
+async def public_search(
+    response: Response,
+    q: str = Query(max_length=200),
+    locale: str = Query(),
+    limit: int = Query(default=20, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> CardPage:
+    _require_locale(locale)
+    q = q.strip()
+    if len(q) < 2:
+        raise AppError(422, "QUERY_TOO_SHORT", "Search needs at least 2 characters")
+    response.headers["Cache-Control"] = CACHE_CONTROL
+    items, total = await search_posts(session, locale, q, limit=limit, offset=offset)
+    return CardPage(items=items, total=total, limit=limit, offset=offset)

@@ -2,6 +2,7 @@ import pytest
 import pytest_asyncio
 from fakeredis import FakeAsyncRedis
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 
@@ -28,6 +29,7 @@ def pg_url():
 async def engine(pg_url):
     eng = create_async_engine(pg_url)
     async with eng.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(Base.metadata.create_all)
     yield eng
     await eng.dispose()

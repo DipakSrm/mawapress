@@ -15,7 +15,7 @@ from app.modules.auth.deps import ROLE_RANK
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
 from app.modules.posts.render import render_html
 from app.modules.posts.schemas import PostCreate, PostUpdate
-from app.modules.seo.generator import SeoInput, build_seo
+from app.modules.seo.generator import SeoInput, build_seo, plain_text
 from app.modules.seo.slug import make_slug
 from app.modules.taxonomy import service as taxonomy_service
 from app.modules.taxonomy.models import Category
@@ -161,6 +161,7 @@ async def create_post(session: AsyncSession, author: User, data: PostCreate) -> 
     tags = await taxonomy_service.get_tags(session, data.tag_ids)
     base = make_slug(data.title)
     content_html = render_html(data.content_json)
+    body_text = plain_text(content_html)
     post: Post
 
     async def assign() -> None:
@@ -173,6 +174,7 @@ async def create_post(session: AsyncSession, author: User, data: PostCreate) -> 
                 slug=await unique_slug(session, data.locale, base),
                 content_json=data.content_json,
                 content_html=content_html,
+                body_text=body_text,
             )
         )
         session.add(post)
@@ -193,9 +195,15 @@ def _check_version(post: Post, if_match: str | None) -> None:
                        {"current_updated_at": post.updated_at.isoformat()})
 
 
+def _set_content(tr: PostTranslation, content_json: dict) -> None:
+    tr.content_json = content_json
+    tr.content_html = render_html(content_json)
+    tr.body_text = plain_text(tr.content_html)
+
+
 class UpdateResult(NamedTuple):
     post: Post
-    public_changed: bool  # True when a translation that is live on the public site was edited
+    public_changed: bool  # True when readers can see the change (live translation edited, or breaking flag on a live post)
 
 
 async def update_post(
@@ -205,7 +213,10 @@ async def update_post(
     own_draft = post.author_id == user.id and post.status == PostStatus.draft
     if not (_is_editor(user) or own_draft):
         raise AppError(403, "FORBIDDEN_ROLE", "You cannot edit this post")
+    if data.is_breaking is not None and not _is_editor(user):
+        raise AppError(403, "FORBIDDEN_ROLE", "Only editors can mark breaking news")
     _check_version(post, if_match)
+    # Validate before changing anything, so a 422 leaves the post untouched.
     tags = await taxonomy_service.get_tags(session, data.tag_ids) if data.tag_ids is not None else None
 
     now = utcnow()
@@ -229,6 +240,7 @@ async def update_post(
                 slug=await unique_slug(session, data.locale, make_slug(title)),
                 content_json=content_json,
                 content_html=content_html,
+                body_text=plain_text(content_html),
             )
             session.add(new_tr)
 
@@ -246,8 +258,7 @@ async def update_post(
             changed = True
             retitle_draft = tr.status != TranslationStatus.published
         if data.content_json is not None and data.content_json != tr.content_json:
-            tr.content_json = data.content_json
-            tr.content_html = render_html(data.content_json)
+            _set_content(tr, data.content_json)
             changed = True
         if changed:
             tr.updated_at = now
@@ -260,15 +271,26 @@ async def update_post(
                 tr.slug = await unique_slug(session, locale, make_slug(title), exclude_id=tr_id)
 
             await _flush_with_slug_retry(session, assign_retitle, refresh_on_conflict=[tr])
-    seo_changed = False
+
+    meta_changed = False
     if "seo_title" in data.model_fields_set and (data.seo_title or None) != tr.seo_title:
         tr.seo_title = data.seo_title or None
-        seo_changed = True
+        meta_changed = True
     if "seo_description" in data.model_fields_set and (data.seo_description or None) != tr.seo_description:
         tr.seo_description = data.seo_description or None
-        seo_changed = True
-    if seo_changed:
+        meta_changed = True
+    if "excerpt" in data.model_fields_set:
+        excerpt = (data.excerpt or "").strip() or None
+        if excerpt != tr.excerpt:
+            tr.excerpt = excerpt
+            meta_changed = True
+    if meta_changed:
         tr.updated_at = now
+
+    if data.is_breaking is not None and data.is_breaking != post.is_breaking:
+        post.is_breaking = data.is_breaking
+        if post.status == PostStatus.published:
+            public_changed = True  # the home page's breaking strip changes
     if tags is not None:
         post.tags = tags
     post.updated_at = now

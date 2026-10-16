@@ -118,3 +118,44 @@ async def test_upgrade_backfills_translation_status_and_sets_server_defaults():
     assert tuple(user) == (True, True)
     assert tuple(post) == ("draft", True, True)
     assert tuple(tr) == ("draft", None, {})
+
+
+async def test_upgrade_backfills_body_text_and_search_vector():
+    with PostgresContainer("postgres:17-alpine", driver="asyncpg") as pg:
+        url = pg.get_connection_url()
+        env = {**os.environ, "MAWA_DATABASE_URL": url}
+        before = _alembic(env, "upgrade", "5e7a9c1d3f42")
+        assert before.returncode == 0, before.stderr
+
+        eng = create_async_engine(url)
+        try:
+            async with eng.begin() as conn:
+                await conn.execute(text(
+                    "INSERT INTO users (id, email, password_hash, name, role) "
+                    "VALUES ('00000000-0000-0000-0000-000000000001', 'e@mawapress.com', 'x', 'E', 'editor')"
+                ))
+                await conn.execute(text("INSERT INTO categories (id, slug, name_ne, name_en) VALUES (1, 'morang', 'मोरङ', 'Morang')"))
+                await conn.execute(text(
+                    "INSERT INTO posts (id, author_id, category_id) VALUES "
+                    "('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-000000000001', 1)"
+                ))
+                await conn.execute(text(
+                    "INSERT INTO post_translations (post_id, locale, title, slug, content_json, content_html) VALUES "
+                    "('00000000-0000-0000-0000-0000000000a1', 'en', 'Storm', 'storm', '{}', "
+                    "'<p>Rain &amp; wind</p><figure><img src=\"https://x/a.webp\"><figcaption>Photo</figcaption></figure>')"
+                ))
+
+            after = _alembic(env, "upgrade", "head")
+            assert after.returncode == 0, after.stderr
+
+            async with eng.begin() as conn:
+                row = (await conn.execute(text(
+                    "SELECT body_text, excerpt, search_vector @@ to_tsquery('simple', 'wind'), "
+                    "search_vector @@ to_tsquery('simple', 'photo') FROM post_translations WHERE slug = 'storm'"
+                ))).one()
+                breaking = await conn.scalar(text("SELECT is_breaking FROM posts"))
+        finally:
+            await eng.dispose()
+
+    assert tuple(row) == ("Rain & wind", None, True, False)
+    assert breaking is False
