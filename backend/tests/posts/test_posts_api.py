@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 
 from sqlalchemy import select
@@ -287,3 +288,40 @@ async def test_slug_collision_gives_409_after_three_attempts(client, session, mo
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "SLUG_TAKEN"
     assert len(calls) == 3
+
+
+async def test_get_post_permissions(client, session):
+    author = await make_user(session)
+    other = await make_user(session)
+    editor = await make_user(session, role=Role.editor)
+    cat = await make_category(session)
+    post = (await create(client, author, cat)).json()
+    url = f"/api/posts/{post['id']}"
+
+    own = await client.get(url, headers=auth_header(author))
+    assert own.status_code == 200
+    assert own.json()["id"] == post["id"]
+
+    denied = await client.get(url, headers=auth_header(other))
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "FORBIDDEN_ROLE"
+
+    assert (await client.get(url, headers=auth_header(editor))).status_code == 200
+
+    unknown = await client.get(f"/api/posts/{uuid.uuid4()}", headers=auth_header(editor))
+    assert unknown.status_code == 404
+    assert unknown.json()["error"]["code"] == "POST_NOT_FOUND"
+
+
+async def test_non_author_reporter_cannot_submit(client, session):
+    author = await make_user(session)
+    other = await make_user(session)
+    cat = await make_category(session)
+    post = (await create(client, author, cat)).json()
+
+    r = await client.post(f"/api/posts/{post['id']}/submit", headers=auth_header(other))
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "FORBIDDEN_ROLE"
+
+    still = await client.get(f"/api/posts/{post['id']}", headers=auth_header(author))
+    assert still.json()["status"] == "draft"
