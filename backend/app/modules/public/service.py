@@ -4,6 +4,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.modules.posts.models import Post
+from app.modules.seo.service import SlugChange
 
 logger = logging.getLogger(__name__)
 
@@ -80,3 +81,16 @@ async def invalidate_public(redis: Redis, post: Post) -> None:
     """Everything a public change to this post can affect: its article keys and every feed."""
     await invalidate_post_cache(redis, post)
     await invalidate_feeds(redis)
+
+
+def redirect_cache_key(path: str) -> str:
+    return f"public:redirect:{path}"
+
+
+async def invalidate_slug_change(redis: Redis, change: SlugChange) -> None:
+    """Drop the old article key and every redirect answer the change touched (404 markers included)."""
+    keys = [post_cache_key(change.locale, change.old_slug), *(redirect_cache_key(p) for p in change.redirect_paths)]
+    try:
+        await redis.delete(*keys)
+    except RedisError:
+        logger.warning("Cache invalidation failed; stale entries expire via TTL", exc_info=True)

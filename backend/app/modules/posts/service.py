@@ -16,7 +16,9 @@ from app.modules.posts.models import Post, PostRevision, PostStatus, PostTransla
 from app.modules.posts.render import render_html
 from app.modules.posts.schemas import PostCreate, PostUpdate
 from app.modules.seo.generator import SeoInput, build_seo, plain_text
-from app.modules.seo.slug import make_slug
+from app.modules.seo import service as seo_service
+from app.modules.seo.service import SlugChange
+from app.modules.seo.slug import is_valid_slug, make_slug
 from app.modules.taxonomy import service as taxonomy_service
 from app.modules.taxonomy.models import Category
 from app.modules.users.models import Role, User
@@ -211,6 +213,20 @@ def _snapshot(tr: PostTranslation) -> dict:
 class UpdateResult(NamedTuple):
     post: Post
     public_changed: bool  # True when readers can see the change (live translation edited, or breaking flag on a live post)
+    slug_change: SlugChange | None = None  # set when an explicit slug change wrote a redirect
+
+
+def _requested_slug(user: User, tr: PostTranslation | None, slug: str) -> str | None:
+    """Validate an explicit slug change before anything is modified. None means 'no change'."""
+    if tr is not None and slug == tr.slug:
+        return None
+    if not _is_editor(user):
+        raise AppError(403, "FORBIDDEN_ROLE", "Only editors can change a slug")
+    if tr is None or tr.status != TranslationStatus.published:
+        raise AppError(422, "SLUG_NOT_EDITABLE", "Only a published translation's slug can be changed; a draft's slug follows its title")
+    if not is_valid_slug(slug):
+        raise AppError(422, "INVALID_SLUG", "Slug must be lower-case letters, digits and single hyphens, at most 80 chars")
+    return slug
 
 
 async def update_post(
@@ -226,8 +242,12 @@ async def update_post(
     # Validate before changing anything, so a 422 leaves the post untouched.
     tags = await taxonomy_service.get_tags(session, data.tag_ids) if data.tag_ids is not None else None
 
-    now = utcnow()
     tr = next((t for t in post.translations if t.locale == data.locale), None)
+    new_slug = _requested_slug(user, tr, data.slug) if data.slug is not None else None
+    if new_slug is not None and await _slug_taken(session, tr.locale, new_slug, tr.id):
+        raise AppError(409, "SLUG_TAKEN", "That slug is already used by another article in this language")
+
+    now = utcnow()
     public_changed = False
     # Readers have seen a published translation, so keep its current state before changing it.
     before = _snapshot(tr) if tr is not None and tr.status == TranslationStatus.published else None
@@ -296,6 +316,26 @@ async def update_post(
     if meta_changed:
         tr.updated_at = now
 
+    slug_change: SlugChange | None = None
+    redirect: dict[str, str] | None = None
+    if new_slug is not None:
+        category = await session.get(Category, post.category_id)
+        old_slug = tr.slug
+        old_path = seo_service.article_path(tr.locale, category.slug, old_slug)
+        new_path = seo_service.article_path(tr.locale, category.slug, new_slug)
+        try:
+            async with session.begin_nested():  # a concurrent save can still take the slug
+                tr.slug = new_slug
+                await session.flush()
+        except IntegrityError as exc:
+            if not _is_slug_conflict(exc):
+                raise
+            raise AppError(409, "SLUG_TAKEN", "That slug is already used by another article in this language") from exc
+        tr.updated_at = now
+        paths = await seo_service.record_slug_change(session, old_path, new_path)
+        slug_change = SlugChange(tr.locale, old_slug, paths)
+        redirect = {"from": old_path, "to": new_path}
+
     if data.is_breaking is not None and data.is_breaking != post.is_breaking:
         post.is_breaking = data.is_breaking
         if post.status == PostStatus.published:
@@ -307,8 +347,11 @@ async def update_post(
     if before is not None and _snapshot(tr) != before:
         session.add(PostRevision(post_id=post.id, locale=tr.locale, editor_id=user.id, **before))
     if public_changed:
-        session.add(_post_event("post.updated", post))
-    return UpdateResult(await _save(session, post), public_changed)
+        event = _post_event("post.updated", post)
+        if redirect is not None:
+            event.payload = {**event.payload, "redirect": redirect}  # lets the worker purge the old URL
+        session.add(event)
+    return UpdateResult(await _save(session, post), public_changed, slug_change)
 
 
 async def list_revisions(

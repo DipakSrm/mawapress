@@ -21,7 +21,7 @@ from app.modules.posts.schemas import (
     SendBackIn,
     TranslationSummary,
 )
-from app.modules.public.service import invalidate_public
+from app.modules.public.service import invalidate_public, invalidate_slug_change
 from app.modules.users.models import Role, User
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
@@ -86,10 +86,12 @@ async def update_post(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> Post:
-    post, public_changed = await service.update_post(session, user, post_id, if_match, body)
-    if public_changed:
-        await invalidate_public(redis, post)
-    return post
+    result = await service.update_post(session, user, post_id, if_match, body)
+    if result.public_changed:
+        await invalidate_public(redis, result.post)
+    if result.slug_change is not None:
+        await invalidate_slug_change(redis, result.slug_change)
+    return result.post
 
 
 @router.post("/{post_id}/submit", response_model=PostOut)
@@ -166,7 +168,7 @@ async def restore_revision(
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> Post:
-    post, public_changed = await service.restore_revision(session, user, post_id, rev_id, if_match)
-    if public_changed:
-        await invalidate_public(redis, post)
-    return post
+    result = await service.restore_revision(session, user, post_id, rev_id, if_match)
+    if result.public_changed:
+        await invalidate_public(redis, result.post)
+    return result.post

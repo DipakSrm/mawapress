@@ -15,6 +15,7 @@ from app.db.session import get_session
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
 from app.modules.public.service import (
     CACHE_CONTROL,
+    CACHE_TTL_SECONDS,
     NEGATIVE_TTL_SECONDS,
     NOT_FOUND_MARKER,
     cache_get,
@@ -24,10 +25,12 @@ from app.modules.public.service import (
     feed_generation,
     home_cache_key,
     post_cache_key,
+    redirect_cache_key,
 )
 from app.modules.public.feeds import category_feed, home_feed
 from app.modules.public.schemas import CardPage, CategoryFeedOut, HomeOut
 from app.modules.public.search import search_posts
+from app.modules.seo import service as seo_service
 from app.modules.taxonomy import service as taxonomy_service
 from app.modules.taxonomy.models import Category
 from app.modules.taxonomy.schemas import CategoryNode
@@ -82,6 +85,11 @@ class PublicPostOut(BaseModel):
     updated_at: datetime
     seo: dict
     alternates: dict[str, str]
+
+
+class RedirectOut(BaseModel):
+    to_path: str
+    code: int
 
 
 def _post_not_found() -> AppError:
@@ -216,3 +224,35 @@ async def public_category(
         CategoryFeedOut,
         lambda: category_feed(session, slug, locale, limit=limit, offset=offset),
     )
+
+
+def _redirect_not_found() -> AppError:
+    return AppError(404, "REDIRECT_NOT_FOUND", "No redirect for this path")
+
+
+@router.get("/redirects/resolve", response_model=RedirectOut)
+async def resolve_redirect(
+    response: Response,
+    path: str = Query(min_length=1, max_length=300),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> RedirectOut:
+    """Used by the Next.js middleware before it renders a 404."""
+    if not path.startswith("/"):
+        raise AppError(422, "INVALID_PATH", "path must start with '/'")
+    response.headers["Cache-Control"] = CACHE_CONTROL
+    key = redirect_cache_key(path)
+    cached = await cache_get(redis, key)
+    if cached == NOT_FOUND_MARKER:
+        raise _redirect_not_found()
+    if cached:
+        response.headers["X-Cache"] = "HIT"
+        return RedirectOut.model_validate_json(cached)
+    row = await seo_service.resolve_redirect(session, path)
+    if row is None:
+        await cache_set(redis, key, NOT_FOUND_MARKER, ttl=CACHE_TTL_SECONDS)
+        raise _redirect_not_found()
+    out = RedirectOut(to_path=row.to_path, code=row.code)
+    await cache_set(redis, key, out.model_dump_json())
+    response.headers["X-Cache"] = "MISS"
+    return out

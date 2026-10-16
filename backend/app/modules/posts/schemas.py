@@ -31,6 +31,7 @@ class PostUpdate(BaseModel):
     tag_ids: list[int] | None = Field(default=None, max_length=20)  # None = unchanged, [] = clear
     excerpt: str | None = Field(default=None, max_length=300)  # "" clears the override
     is_breaking: bool | None = None  # editor+ only
+    slug: str | None = Field(default=None, max_length=80)  # editor+, published translations only; writes a 301
 
 
 class TranslationOut(BaseModel):
