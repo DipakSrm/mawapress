@@ -9,7 +9,9 @@ from app.core.errors import AppError
 from app.db.session import get_session
 from app.modules.auth.deps import current_user
 from app.modules.auth.security import DUMMY_PASSWORD_HASH, create_access_token, verify_password
+from app.modules.users import service as users_service
 from app.modules.users.models import Role, User
+from app.modules.users.schemas import MeUpdate
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -31,6 +33,7 @@ class MeOut(BaseModel):
     email: str
     name: str
     role: Role
+    bio: str | None
 
 
 @router.post("/login", response_model=TokenOut)
@@ -47,3 +50,10 @@ async def login(body: LoginIn, session: AsyncSession = Depends(get_session)) -> 
 @router.get("/me", response_model=MeOut)
 async def me(user: User = Depends(current_user)) -> User:
     return user
+
+
+@router.patch("/me", response_model=MeOut)
+async def update_me(
+    body: MeUpdate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+) -> User:
+    return await users_service.update_me(session, user, body)
