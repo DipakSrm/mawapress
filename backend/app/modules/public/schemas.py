@@ -20,3 +20,28 @@ class CardPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class PublicCategory(BaseModel):
+    id: int
+    slug: str
+    name: str  # in the requested locale
+    seo_description: str | None
+
+
+class HomeCategoryBlock(BaseModel):
+    category: PublicCategory
+    posts: list[PublicCard]
+
+
+class HomeOut(BaseModel):
+    breaking: list[PublicCard]
+    categories: list[HomeCategoryBlock]
+
+
+class CategoryFeedOut(BaseModel):
+    category: PublicCategory
+    items: list[PublicCard]
+    total: int
+    limit: int
+    offset: int

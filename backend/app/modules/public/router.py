@@ -1,5 +1,7 @@
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
+from typing import TypeVar
 
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, TypeAdapter
@@ -18,10 +20,13 @@ from app.modules.public.service import (
     cache_get,
     cache_set,
     categories_cache_key,
+    category_feed_cache_key,
     feed_generation,
+    home_cache_key,
     post_cache_key,
 )
-from app.modules.public.schemas import CardPage
+from app.modules.public.feeds import category_feed, home_feed
+from app.modules.public.schemas import CardPage, CategoryFeedOut, HomeOut
 from app.modules.public.search import search_posts
 from app.modules.taxonomy import service as taxonomy_service
 from app.modules.taxonomy.models import Category
@@ -38,6 +43,31 @@ def _require_locale(locale: str) -> None:
     # Public routes treat an unknown locale as a page that does not exist (M2a1 ruling).
     if locale not in SUPPORTED_LOCALES:
         raise AppError(404, "LOCALE_NOT_FOUND", "Unknown locale")
+
+
+M = TypeVar("M", bound=BaseModel)
+
+
+async def _cached_feed(
+    response: Response,
+    redis: Redis,
+    make_key: Callable[[str], str],
+    model: type[M],
+    build: Callable[[], Awaitable[M]],
+) -> M:
+    """Serve a feed from Redis under the current feed generation, or build and store it."""
+    response.headers["Cache-Control"] = CACHE_CONTROL
+    gen = await feed_generation(redis)
+    key = make_key(gen) if gen is not None else None
+    cached = await cache_get(redis, key) if key else None
+    if cached:
+        response.headers["X-Cache"] = "HIT"
+        return model.model_validate_json(cached)
+    out = await build()
+    if key:
+        await cache_set(redis, key, out.model_dump_json())
+    response.headers["X-Cache"] = "MISS"
+    return out
 
 
 class PublicPostOut(BaseModel):
@@ -153,3 +183,36 @@ async def public_search(
     response.headers["Cache-Control"] = CACHE_CONTROL
     items, total = await search_posts(session, locale, q, limit=limit, offset=offset)
     return CardPage(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/home", response_model=HomeOut)
+async def public_home(
+    response: Response,
+    locale: str = Query(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> HomeOut:
+    _require_locale(locale)
+    return await _cached_feed(
+        response, redis, lambda gen: home_cache_key(gen, locale), HomeOut, lambda: home_feed(session, locale)
+    )
+
+
+@router.get("/category/{slug}", response_model=CategoryFeedOut)
+async def public_category(
+    slug: str,
+    response: Response,
+    locale: str = Query(),
+    limit: int = Query(default=20, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> CategoryFeedOut:
+    _require_locale(locale)
+    return await _cached_feed(
+        response,
+        redis,
+        lambda gen: category_feed_cache_key(gen, slug, locale, limit, offset),
+        CategoryFeedOut,
+        lambda: category_feed(session, slug, locale, limit=limit, offset=offset),
+    )

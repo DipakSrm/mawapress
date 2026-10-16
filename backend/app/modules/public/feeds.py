@@ -1,10 +1,13 @@
 """Read-side queries for public cards. A card is a published translation of a published post."""
 
 from sqlalchemy import Select, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import AppError
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
-from app.modules.public.schemas import PublicCard
+from app.modules.public.schemas import CategoryFeedOut, HomeCategoryBlock, HomeOut, PublicCard, PublicCategory
 from app.modules.seo.generator import truncate_words
+from app.modules.taxonomy import service as taxonomy_service
 from app.modules.taxonomy.models import Category
 from app.modules.users.models import User
 
@@ -50,4 +53,56 @@ def to_card(row) -> PublicCard:
         category_slug=row.category_slug,
         author_name=row.author_name,
         published_at=row.published_at,
+    )
+
+
+HOME_BREAKING_LIMIT = 10
+HOME_CATEGORY_POSTS = 6
+NEWEST_FIRST = (PUBLISHED_AT.desc(), Post.id.desc())
+
+
+def _public_category(cat: Category, locale: str) -> PublicCategory:
+    return PublicCategory(
+        id=cat.id,
+        slug=cat.slug,
+        name=cat.name_ne if locale == "ne" else cat.name_en,
+        seo_description=cat.seo_description,
+    )
+
+
+async def _cards(session: AsyncSession, stmt: Select) -> list[PublicCard]:
+    return [to_card(row) for row in await session.execute(stmt)]
+
+
+async def home_feed(session: AsyncSession, locale: str) -> HomeOut:
+    breaking = await _cards(
+        session,
+        card_query(locale).where(Post.is_breaking.is_(True)).order_by(*NEWEST_FIRST).limit(HOME_BREAKING_LIMIT),
+    )
+    cats = await taxonomy_service.all_categories(session)  # ordered by sort, id
+    blocks: list[HomeCategoryBlock] = []
+    # One small query per top-level category: a newsroom has about ten, and the result is cached.
+    for root in (c for c in cats.values() if c.parent_id is None):
+        ids = taxonomy_service.descendant_ids(cats, root.id)
+        posts = await _cards(
+            session,
+            card_query(locale).where(Post.category_id.in_(ids)).order_by(*NEWEST_FIRST).limit(HOME_CATEGORY_POSTS),
+        )
+        if posts:
+            blocks.append(HomeCategoryBlock(category=_public_category(root, locale), posts=posts))
+    return HomeOut(breaking=breaking, categories=blocks)
+
+
+async def category_feed(
+    session: AsyncSession, slug: str, locale: str, *, limit: int, offset: int
+) -> CategoryFeedOut:
+    cats = await taxonomy_service.all_categories(session)
+    cat = next((c for c in cats.values() if c.slug == slug), None)
+    if cat is None:
+        raise AppError(404, "CATEGORY_NOT_FOUND", "Category not found")
+    base = card_query(locale).where(Post.category_id.in_(taxonomy_service.descendant_ids(cats, cat.id)))
+    total = await session.scalar(select(func.count()).select_from(base.subquery()))
+    items = await _cards(session, base.order_by(*NEWEST_FIRST).limit(limit).offset(offset))
+    return CategoryFeedOut(
+        category=_public_category(cat, locale), items=items, total=total or 0, limit=limit, offset=offset
     )

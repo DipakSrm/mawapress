@@ -27,6 +27,14 @@ def categories_cache_key(gen: str) -> str:
     return f"public:categories:{gen}"
 
 
+def home_cache_key(gen: str, locale: str) -> str:
+    return f"public:home:{gen}:{locale}"
+
+
+def category_feed_cache_key(gen: str, slug: str, locale: str, limit: int, offset: int) -> str:
+    return f"public:category:{gen}:{slug}:{locale}:{limit}:{offset}"
+
+
 async def feed_generation(redis: Redis) -> str | None:
     """Current feed generation, or None when Redis is unavailable (callers then skip the cache)."""
     try:
