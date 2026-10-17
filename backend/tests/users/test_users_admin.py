@@ -110,3 +110,35 @@ async def test_admin_sets_password(client, session):
     assert r.status_code == 204
     assert (await login(client, "pw@mawapress.com", "old-password-1")).status_code == 401
     assert (await login(client, "pw@mawapress.com", "new-password-1")).status_code == 200
+
+
+async def test_cannot_demote_or_deactivate_the_last_active_admin(session):
+    # A stale actor (another admin acted concurrently and the actor's own row has since changed)
+    # must not be able to leave the system with zero active admins.
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from app.core.errors import AppError
+    from app.modules.users import service
+    from app.modules.users.schemas import UserUpdate
+
+    only_admin = await make_user(session, role=Role.admin)
+    await make_user(session, role=Role.admin, is_active=False)  # inactive admins do not count
+    stale_actor = SimpleNamespace(id=uuid4())
+    for patch in ({"role": Role.editor}, {"is_active": False}):
+        try:
+            await service.update_user(session, stale_actor, only_admin.id, UserUpdate(**patch))
+        except AppError as exc:
+            assert (exc.status, exc.code) == (409, "LAST_ADMIN")
+        else:
+            raise AssertionError("expected LAST_ADMIN")
+    assert only_admin.role == Role.admin and only_admin.is_active is True
+
+
+async def test_demoting_one_of_two_admins_is_allowed_and_revokes_sessions(client, session):
+    first = await make_user(session, role=Role.admin)
+    second = await make_user(session, role=Role.admin)
+    r = await client.patch(f"/api/users/{second.id}", json={"role": "editor"}, headers=auth_header(first))
+    assert r.status_code == 200
+    assert r.json()["role"] == "editor"
+    assert second.token_version == 1

@@ -54,3 +54,60 @@ async def test_me_cannot_change_role_or_use_short_password(client, session):
 
 async def test_me_update_requires_login(client):
     assert (await client.patch("/api/auth/me", json={"name": "x"})).status_code == 401
+
+
+async def test_current_password_alone_is_422_new_password_required(client, session):
+    user = await make_user(session, password="first-password-1")
+    r = await client.patch("/api/auth/me", json={"current_password": "first-password-1"}, headers=auth_header(user))
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "NEW_PASSWORD_REQUIRED"
+
+
+async def test_new_password_equal_to_current_is_422_password_unchanged(client, session):
+    user = await make_user(session, password="first-password-1")
+    r = await client.patch(
+        "/api/auth/me",
+        json={"current_password": "first-password-1", "new_password": "first-password-1"},
+        headers=auth_header(user),
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "PASSWORD_UNCHANGED"
+    assert user.token_version == 0  # nothing was revoked
+
+
+async def test_password_change_returns_a_fresh_session_and_revokes_the_others(client, session):
+    user = await make_user(session, email="keep@mawapress.com", password="first-password-1")
+    old_login = await client.post("/api/auth/login", json={"email": "keep@mawapress.com", "password": "first-password-1"})
+    old_token, old_refresh = old_login.json()["access_token"], client.cookies.get("mawa_refresh")
+    client.cookies.clear()  # the "other device" keeps old_token / old_refresh; this client is the changer
+
+    r = await client.patch(
+        "/api/auth/me",
+        json={"current_password": "first-password-1", "new_password": "second-password-2"},
+        headers={"Authorization": f"Bearer {old_token}"},
+    )
+    assert r.status_code == 200, r.text
+    new_token = r.json()["access_token"]
+    set_cookies = r.headers.get_list("set-cookie")
+    assert any(c.startswith("mawa_refresh=") for c in set_cookies) and any(c.startswith("mawa_csrf=") for c in set_cookies)
+
+    # the returned token works, the old one does not
+    assert (await client.get("/api/auth/me", headers={"Authorization": f"Bearer {new_token}"})).status_code == 200
+    assert (await client.get("/api/auth/me", headers={"Authorization": f"Bearer {old_token}"})).status_code == 401
+
+    # the new cookies keep the session alive through /refresh; the other session's refresh token is dead
+    csrf = client.cookies.get("mawa_csrf")
+    refreshed = await client.post("/api/auth/refresh", headers={"X-CSRF-Token": csrf})
+    assert refreshed.status_code == 200
+    assert (await client.get("/api/auth/me", headers={"Authorization": f"Bearer {refreshed.json()['access_token']}"})).status_code == 200
+    stale = await client.post(
+        "/api/auth/refresh", headers={"Cookie": f"mawa_refresh={old_refresh}; mawa_csrf=x", "X-CSRF-Token": "x"}
+    )
+    assert stale.status_code == 401
+
+
+async def test_profile_only_update_has_no_access_token_and_sets_no_cookies(client, session):
+    user = await make_user(session)
+    r = await client.patch("/api/auth/me", json={"name": "New Name"}, headers=auth_header(user))
+    assert r.status_code == 200 and r.json().get("access_token") is None
+    assert r.headers.get_list("set-cookie") == []

@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 60
 CACHE_CONTROL = "public, s-maxage=60, stale-while-revalidate=86400"
+XML_CACHE_TTL_SECONDS = 300
+XML_CACHE_CONTROL = "public, s-maxage=300"
 NEGATIVE_TTL_SECONDS = 30
 # Stored under a post key when the article does not exist. Every action that can make a slug
 # public (publish, translation publish, slug change) deletes that post's keys, marker included.
@@ -37,6 +39,10 @@ def home_cache_key(gen: str, locale: str) -> str:
 
 def category_feed_cache_key(gen: str, slug: str, locale: str, limit: int, offset: int) -> str:
     return f"public:category:{gen}:{slug}:{locale}:{limit}:{offset}"
+
+
+def xml_cache_key(gen: str, name: str) -> str:
+    return f"public:xml:{gen}:{name}"
 
 
 async def feed_generation(redis: Redis) -> str | None:

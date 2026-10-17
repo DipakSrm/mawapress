@@ -28,7 +28,7 @@ async def test_search_ranks_title_matches_above_body_matches(client, session):
     assert first["category_slug"] == "morang"
     assert first["author_name"] == "Sita Rai"
     assert first["published_at"] is not None
-    assert first["featured_image"] is None
+    assert first["image"] is None
 
 
 async def test_search_nepali_and_typo_tolerant_title(client, session):

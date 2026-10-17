@@ -4,6 +4,14 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
+class PublicImage(BaseModel):
+    url: str
+    width: int
+    height: int
+    alt: str  # the locale's alt text, else the caption, else the title
+    variants: dict[str, str]
+
+
 class PublicCard(BaseModel):
     id: uuid.UUID
     title: str
@@ -12,7 +20,7 @@ class PublicCard(BaseModel):
     category_slug: str
     author_name: str
     published_at: datetime | None
-    featured_image: str | None = None  # media and featured images arrive in M2b
+    image: PublicImage | None = None
 
 
 class CardPage(BaseModel):

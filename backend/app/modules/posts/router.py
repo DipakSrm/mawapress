@@ -1,6 +1,7 @@
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Path, Query
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +18,9 @@ from app.modules.posts.schemas import (
     PostOut,
     PostSummary,
     PostUpdate,
+    RevisionListOut,
     RevisionOut,
+    ScheduleIn,
     SendBackIn,
     TranslationSummary,
 )
@@ -25,6 +28,7 @@ from app.modules.public.service import invalidate_public, invalidate_slug_change
 from app.modules.users.models import Role, User
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
+RevisionId = Annotated[int, Path(ge=1, le=2**63 - 1)]  # revision ids are BIGINT; anything larger would be a 500
 any_staff = require_role(Role.reporter)
 editors = require_role(Role.editor)
 
@@ -36,8 +40,10 @@ def _summary(post: Post, author_name: str) -> PostSummary:
         category_id=post.category_id,
         author_id=post.author_id,
         author_name=author_name,
+        view_count=post.view_count,
         updated_at=post.updated_at,
         published_at=post.published_at,
+        scheduled_at=post.scheduled_at,
         translations=[TranslationSummary.model_validate(t) for t in post.translations],
     )
 
@@ -112,6 +118,40 @@ async def publish_post(
     return post
 
 
+@router.post("/{post_id}/schedule", response_model=PostOut)
+async def schedule_post(
+    post_id: uuid.UUID,
+    body: ScheduleIn,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+) -> Post:
+    return await service.schedule_post(session, post_id, if_match, body.scheduled_at)
+
+
+@router.post("/{post_id}/unschedule", response_model=PostOut)
+async def unschedule_post(
+    post_id: uuid.UUID,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+) -> Post:
+    return await service.unschedule_post(session, post_id, if_match)
+
+
+@router.post("/{post_id}/unarchive", response_model=PostOut)
+async def unarchive_post(
+    post_id: uuid.UUID,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Post:
+    post = await service.unarchive_post(session, post_id, if_match)
+    await invalidate_public(redis, post)
+    return post
+
+
 @router.post("/{post_id}/translations/{locale}/publish", response_model=PostOut)
 async def publish_translation(
     post_id: uuid.UUID,
@@ -130,10 +170,11 @@ async def publish_translation(
 async def send_back_post(
     post_id: uuid.UUID,
     body: SendBackIn | None = None,
+    if_match: str | None = Header(default=None),
     user: User = Depends(editors),
     session: AsyncSession = Depends(get_session),
 ) -> Post:
-    return await service.send_back_post(session, user, post_id, body.note if body else None)
+    return await service.send_back_post(session, user, post_id, if_match, body.note if body else None)
 
 
 @router.post("/{post_id}/unpublish", response_model=PostOut)
@@ -149,20 +190,33 @@ async def unpublish_post(
     return post
 
 
-@router.get("/{post_id}/revisions", response_model=list[RevisionOut])
+@router.get("/{post_id}/revisions", response_model=RevisionListOut)
 async def list_revisions(
     post_id: uuid.UUID,
     locale: Locale | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(any_staff),
+    session: AsyncSession = Depends(get_session),
+) -> RevisionListOut:
+    items, total = await service.list_revisions(session, user, post_id, locale, limit=limit, offset=offset)
+    return RevisionListOut(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/{post_id}/revisions/{rev_id}", response_model=RevisionOut)
+async def get_revision(
+    post_id: uuid.UUID,
+    rev_id: RevisionId,
     user: User = Depends(any_staff),
     session: AsyncSession = Depends(get_session),
 ):
-    return await service.list_revisions(session, user, post_id, locale)
+    return await service.get_revision(session, user, post_id, rev_id)
 
 
 @router.post("/{post_id}/revisions/{rev_id}/restore", response_model=PostOut)
 async def restore_revision(
     post_id: uuid.UUID,
-    rev_id: int,
+    rev_id: RevisionId,
     if_match: str | None = Header(default=None),
     user: User = Depends(editors),
     session: AsyncSession = Depends(get_session),

@@ -46,7 +46,7 @@ async def test_home_groups_latest_posts_by_top_level_category(client, session):
     assert blocks[0]["posts"][1]["category_slug"] == "morang"
     assert slugs(blocks[1]["posts"]) == ["charlie"]
     card = blocks[1]["posts"][0]
-    assert set(card) == {"id", "title", "slug", "excerpt", "category_slug", "author_name", "published_at", "featured_image"}
+    assert set(card) == {"id", "title", "slug", "excerpt", "category_slug", "author_name", "published_at", "image"}
     assert card["author_name"] == "Sita Rai"
 
 

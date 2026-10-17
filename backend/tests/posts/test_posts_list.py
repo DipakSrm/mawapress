@@ -68,7 +68,8 @@ async def test_items_are_compact_summaries(client, session):
     await create(client, alice, cat)
     item = (await list_posts(client, alice))["items"][0]
     assert set(item) == {
-        "id", "status", "category_id", "author_id", "author_name", "updated_at", "published_at", "translations"
+        "id", "status", "category_id", "author_id", "author_name", "view_count", "updated_at", "published_at", "scheduled_at",
+        "translations",
     }
     assert item["author_name"] == "Alice Rai"
     assert item["translations"] == [

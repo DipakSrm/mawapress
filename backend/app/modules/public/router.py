@@ -1,21 +1,29 @@
+import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import TypeVar
+from typing import Literal, TypeVar
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, TypeAdapter
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import get_redis
+from app.core.config import get_settings
 from app.core.errors import AppError
+from app.core.ratelimit import client_ip, limit_search, limit_view
 from app.db.session import get_session
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
 from app.modules.public.service import (
     CACHE_CONTROL,
     CACHE_TTL_SECONDS,
+    XML_CACHE_CONTROL,
+    XML_CACHE_TTL_SECONDS,
+    xml_cache_key,
     NEGATIVE_TTL_SECONDS,
     NOT_FOUND_MARKER,
     cache_get,
@@ -29,8 +37,10 @@ from app.modules.public.service import (
     post_cache_key,
     redirect_cache_key,
 )
-from app.modules.public.feeds import category_feed, home_feed
-from app.modules.public.schemas import CardPage, CategoryFeedOut, HomeOut
+from app.modules.public.feeds import category_feed, home_feed, public_image
+from app.modules.public.schemas import CardPage, CategoryFeedOut, HomeOut, PublicCard, PublicImage
+from app.modules.public import xmlfeeds
+from app.modules.public import stats
 from app.modules.public.search import search_posts
 from app.modules.seo import service as seo_service
 from app.modules.taxonomy import service as taxonomy_service
@@ -40,7 +50,10 @@ from app.modules.users.models import User
 
 router = APIRouter(prefix="/api/public", tags=["public"])
 
+logger = logging.getLogger(__name__)
+
 SUPPORTED_LOCALES = ("ne", "en")
+POST_SLUG_PATTERN = re.compile(r"[a-z0-9-]{1,100}")  # anything else cannot exist; never cache its 404
 MAX_OFFSET = 1000  # deep pages are expensive and nobody reads them
 _category_tree = TypeAdapter(list[CategoryNode])  # dumping only; reads go through cached_model
 
@@ -88,6 +101,7 @@ class PublicPostOut(BaseModel):
     updated_at: datetime
     seo: dict
     alternates: dict[str, str]
+    image: PublicImage | None = None
 
 
 class RedirectOut(BaseModel):
@@ -108,7 +122,7 @@ async def get_public_post(
     redis: Redis = Depends(get_redis),
 ) -> PublicPostOut:
     # An unknown locale is just a page that does not exist: same 404 as a missing slug.
-    if locale not in SUPPORTED_LOCALES:
+    if locale not in SUPPORTED_LOCALES or POST_SLUG_PATTERN.fullmatch(slug) is None:
         raise _post_not_found()
     response.headers["Cache-Control"] = CACHE_CONTROL
     key = post_cache_key(locale, slug)
@@ -153,6 +167,7 @@ async def get_public_post(
             for t in post.translations
             if t.locale != tr.locale and t.status == TranslationStatus.published
         },
+        image=public_image(locale, post.featured_media, tr.title),
     )
     await cache_set(redis, key, out.model_dump_json())
     response.headers["X-Cache"] = "MISS"
@@ -187,6 +202,7 @@ async def public_search(
     limit: int = Query(default=20, ge=1, le=50),
     offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
     session: AsyncSession = Depends(get_session),
+    _: None = Depends(limit_search),
 ) -> CardPage:
     _require_locale(locale)
     q = q.strip()
@@ -237,14 +253,18 @@ def _redirect_not_found() -> AppError:
 @router.get("/redirects/resolve", response_model=RedirectOut)
 async def resolve_redirect(
     response: Response,
-    path: str = Query(min_length=1, max_length=300),
+    path: str = Query(),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> RedirectOut:
     """Used by the Next.js middleware before it renders a 404."""
-    if not path.startswith("/"):
-        raise AppError(422, "INVALID_PATH", "path must start with '/'")
+    if not path.startswith("/") or len(path) > seo_service.MAX_PATH_LENGTH:
+        raise AppError(422, "INVALID_PATH", f"path must start with '/' and be at most {seo_service.MAX_PATH_LENGTH} characters")
     response.headers["Cache-Control"] = CACHE_CONTROL
+    normalized = seo_service.normalize_article_path(path)
+    if normalized is None:  # cannot be an article path: no lookup, and nothing worth caching
+        raise _redirect_not_found()
+    path = normalized
     key = redirect_cache_key(path)
     cached = await cache_get(redis, key)
     if cached == NOT_FOUND_MARKER:
@@ -259,5 +279,153 @@ async def resolve_redirect(
         raise _redirect_not_found()
     out = RedirectOut(to_path=row.to_path, code=row.code)
     await cache_set(redis, key, out.model_dump_json())
+    response.headers["X-Cache"] = "MISS"
+    return out
+
+
+async def _cached_xml(
+    redis: Redis, name: str, media_type: str, build: Callable[[], Awaitable[str]]
+) -> Response:
+    """Serve an XML document from Redis under the current feed generation, or build and store it."""
+    headers = {"Cache-Control": XML_CACHE_CONTROL}
+    gen = await feed_generation(redis)
+    key = xml_cache_key(gen, name) if gen is not None else None
+    cached = await cache_get(redis, key) if key else None
+    if cached is not None:
+        return Response(cached, media_type=media_type, headers={**headers, "X-Cache": "HIT"})
+    body = await build()
+    if key:
+        await cache_set(redis, key, body, ttl=XML_CACHE_TTL_SECONDS)
+    return Response(body, media_type=media_type, headers={**headers, "X-Cache": "MISS"})
+
+
+def _site() -> str:
+    return get_settings().site_url.rstrip("/")
+
+
+@router.get("/sitemap.xml")
+async def sitemap_index(
+    session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)
+) -> Response:
+    return await _cached_xml(redis, "index", "application/xml", lambda: xmlfeeds.sitemap_index(session, _site()))
+
+
+@router.get("/sitemaps/categories.xml")
+async def categories_sitemap(
+    session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)
+) -> Response:
+    return await _cached_xml(
+        redis, "categories", "application/xml", lambda: xmlfeeds.categories_sitemap(session, _site())
+    )
+
+
+@router.get("/sitemaps/posts-{month}.xml")
+async def posts_sitemap(
+    month: str, session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)
+) -> Response:
+    window = xmlfeeds.parse_month(month)  # only real YYYY-MM values may become cache keys
+    if window is None:
+        raise AppError(404, "SITEMAP_NOT_FOUND", "No such sitemap")
+    return await _cached_xml(
+        redis, f"posts:{month}", "application/xml", lambda: xmlfeeds.month_sitemap(session, _site(), *window)
+    )
+
+
+@router.get("/news-sitemap.xml")
+async def news_sitemap(
+    session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)
+) -> Response:
+    return await _cached_xml(redis, "news", "application/xml", lambda: xmlfeeds.news_sitemap(session, _site()))
+
+
+@router.get("/rss.xml")
+async def rss(
+    locale: str = Query(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Response:
+    _require_locale(locale)
+    return await _cached_xml(
+        redis, f"rss:{locale}", "application/rss+xml", lambda: xmlfeeds.rss_feed(session, _site(), locale, None)
+    )
+
+
+@router.get("/category/{slug}/rss.xml")
+async def category_rss(
+    slug: str,
+    locale: str = Query(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Response:
+    _require_locale(locale)
+    return await _cached_xml(
+        redis,
+        f"rss:{locale}:{slug}",
+        "application/rss+xml",
+        lambda: xmlfeeds.rss_feed(session, _site(), locale, slug),
+    )
+
+
+class ViewIn(BaseModel):
+    post_id: uuid.UUID
+    locale: Literal["ne", "en"]
+
+
+@router.post("/stats/view", status_code=204)
+async def count_view(
+    body: ViewIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    _: None = Depends(limit_view),
+) -> Response:
+    """Always 204, so the endpoint never reveals whether a post exists or whether the view counted."""
+    if await stats.is_countable(session, body.post_id, body.locale):
+        try:
+            await stats.record_view(redis, body.post_id, body.locale, client_ip(request))
+        except RedisError:
+            logger.warning("View not counted; Redis unavailable", exc_info=True)
+    return Response(status_code=204)
+
+
+_cards = TypeAdapter(list[PublicCard])
+TRENDING_PADDED_TTL = 15
+TRENDING_PADDED_CONTROL = "public, s-maxage=15"
+
+
+@router.get("/trending", response_model=list[PublicCard])
+async def public_trending(
+    response: Response,
+    locale: str = Query(),
+    limit: int = Query(default=10, ge=1, le=20),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> list[PublicCard]:
+    _require_locale(locale)
+    gen = await feed_generation(redis)  # None: Redis unavailable, so no cache read or write
+    for padded in (False, True):
+        if gen is None:
+            break
+        cached = await cached_model(redis, stats.trending_cache_key(gen, locale, limit, padded), list[PublicCard])
+        if cached is not None:
+            response.headers["X-Cache"] = "HIT"
+            response.headers["Cache-Control"] = TRENDING_PADDED_CONTROL if padded else CACHE_CONTROL
+            return cached
+    try:
+        out = await stats.top_by_redis(session, redis, locale, limit)
+    except RedisError:
+        logger.warning("Trending unavailable from Redis; falling back to view_count", exc_info=True)
+        response.headers["X-Cache"] = "BYPASS"
+        response.headers["Cache-Control"] = TRENDING_PADDED_CONTROL
+        return await stats.top_by_view_count(session, locale, limit)
+    padded = len(out) < limit  # a quiet day: top up from the most-viewed recent posts, Redis ranking first
+    if padded:
+        out += await stats.top_by_view_count(session, locale, limit - len(out), exclude={c.id for c in out})
+    response.headers["Cache-Control"] = TRENDING_PADDED_CONTROL if padded else CACHE_CONTROL
+    if gen is not None:
+        await cache_set(
+            redis, stats.trending_cache_key(gen, locale, limit, padded), _cards.dump_json(out).decode(),
+            ttl=TRENDING_PADDED_TTL if padded else CACHE_TTL_SECONDS,
+        )
     response.headers["X-Cache"] = "MISS"
     return out

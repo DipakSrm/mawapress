@@ -1,17 +1,19 @@
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import NamedTuple
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db.base import utcnow
 from app.db.outbox import OutboxEvent
 from app.modules.auth.deps import ROLE_RANK
+from app.modules.media.models import Media
 from app.modules.posts.models import Post, PostRevision, PostStatus, PostTranslation, TranslationStatus
 from app.modules.posts.render import render_html
 from app.modules.posts.schemas import PostCreate, PostUpdate
@@ -77,6 +79,13 @@ def _post_event(topic: str, post: Post) -> OutboxEvent:
     )
 
 
+def _og_image_url(media: Media | None, site_url: str) -> str | None:
+    if media is None:
+        return None
+    url = media.variants.get("og") or media.url
+    return f"{site_url}{url}" if url.startswith("/") else url  # social crawlers need an absolute URL
+
+
 async def _refresh_all_seo(session: AsyncSession, post: Post) -> None:
     category = await session.get(Category, post.category_id)
     author = await session.get(User, post.author_id)
@@ -98,6 +107,7 @@ async def _refresh_all_seo(session: AsyncSession, post: Post) -> None:
                 author_name=author.name,
                 published_at=tr.published_at or post.published_at,
                 modified_at=tr.updated_at,
+                image_url=_og_image_url(post.featured_media, site_url),
                 seo_title=tr.seo_title,
                 seo_description=tr.seo_description,
                 alternate_slugs=alternates,
@@ -105,6 +115,21 @@ async def _refresh_all_seo(session: AsyncSession, post: Post) -> None:
             site_url,
         )
         tr.seo_auto = meta.to_dict()
+
+
+async def touch_posts_for_media(session: AsyncSession, media_id: uuid.UUID, *, refresh_seo: bool) -> list[Post]:
+    """A featured media's public data changed: refresh seo_auto (when it feeds in) and queue `post.updated`
+    for the live posts using it. Returns those live posts so the caller can invalidate caches after commit.
+    Does not bump updated_at, so editors' If-Match versions stay valid."""
+    posts = (await session.scalars(select(Post).where(Post.featured_media_id == media_id))).all()
+    live: list[Post] = []
+    for post in posts:
+        if refresh_seo:
+            await _refresh_all_seo(session, post)
+        if post.status == PostStatus.published:
+            session.add(_post_event("post.updated", post))
+            live.append(post)
+    return live
 
 
 async def _save(session: AsyncSession, post: Post) -> Post:
@@ -157,9 +182,22 @@ async def _flush_with_slug_retry(
     raise AppError(409, "SLUG_TAKEN", "Could not allocate a unique slug; please retry")
 
 
+async def _get_featured_media(session: AsyncSession, media_id: uuid.UUID | None) -> Media | None:
+    if media_id is None:
+        return None
+    # FOR SHARE: a concurrent media DELETE (FOR UPDATE) must wait for this transaction, then see the post.
+    media = await session.scalar(
+        select(Media).where(Media.id == media_id).with_for_update(read=True).execution_options(populate_existing=True)
+    )
+    if media is None:
+        raise AppError(422, "MEDIA_NOT_FOUND", "Featured image does not exist")
+    return media
+
+
 async def create_post(session: AsyncSession, author: User, data: PostCreate) -> Post:
     if await session.get(Category, data.category_id) is None:
         raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
+    featured = await _get_featured_media(session, data.featured_media_id)
     tags = await taxonomy_service.get_tags(session, data.tag_ids)
     base = make_slug(data.title)
     content_html = render_html(data.content_json)
@@ -168,7 +206,10 @@ async def create_post(session: AsyncSession, author: User, data: PostCreate) -> 
 
     async def assign() -> None:
         nonlocal post
-        post = Post(author_id=author.id, category_id=data.category_id, status=PostStatus.draft, tags=list(tags))
+        post = Post(
+            author_id=author.id, category_id=data.category_id, status=PostStatus.draft, tags=list(tags),
+            featured_media=featured,
+        )
         post.translations.append(
             PostTranslation(
                 locale=data.locale,
@@ -212,7 +253,7 @@ def _snapshot(tr: PostTranslation) -> dict:
 
 class UpdateResult(NamedTuple):
     post: Post
-    public_changed: bool  # True when readers can see the change (live translation edited, or breaking flag on a live post)
+    public_changed: bool  # True when readers can see the change (live translation edited, or breaking flag / featured image on a live post)
     slug_changes: Sequence[SlugChange] = ()  # one per translation whose public path moved and got a redirect
 
 
@@ -246,6 +287,8 @@ async def update_post(
         if new_category is None:
             raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
     tags = await taxonomy_service.get_tags(session, data.tag_ids) if data.tag_ids is not None else None
+    featured_requested = "featured_media_id" in data.model_fields_set
+    new_featured = await _get_featured_media(session, data.featured_media_id) if featured_requested else None
 
     tr = next((t for t in post.translations if t.locale == data.locale), None)
     new_slug = _requested_slug(user, tr, data.slug) if data.slug is not None else None
@@ -341,8 +384,10 @@ async def update_post(
         redirects.append(redirect)
 
     category_moved_publicly = False
+    old_category_id: int | None = None
     if new_category is not None:
         old_category = await session.get(Category, post.category_id)
+        old_category_id = old_category.id
         post.category_id = new_category.id
         if post.status == PostStatus.published:
             for t in post.translations:
@@ -359,6 +404,9 @@ async def update_post(
     breaking_changed = data.is_breaking is not None and data.is_breaking != post.is_breaking
     if breaking_changed:
         post.is_breaking = data.is_breaking
+    featured_changed = featured_requested and data.featured_media_id != post.featured_media_id
+    if featured_changed:
+        post.featured_media = new_featured
     if tags is not None:
         post.tags = tags
     post.updated_at = now
@@ -368,12 +416,14 @@ async def update_post(
     translation_changed = before is not None and _snapshot(tr) != before
     if translation_changed:
         session.add(PostRevision(post_id=post.id, locale=tr.locale, editor_id=user.id, **before))
-    # Tags are not public yet. The breaking flag shows on the home page whichever translation is edited.
+    # Tags are not public yet. The breaking flag and the featured image show on cards whichever translation is edited.
     public_changed = post.status == PostStatus.published and (
-        translation_changed or breaking_changed or category_moved_publicly
+        translation_changed or breaking_changed or category_moved_publicly or featured_changed
     )
     if public_changed:
         event = _post_event("post.updated", post)
+        if old_category_id is not None:  # lets the worker revalidate the category it left
+            event.payload = {**event.payload, "old_category_id": old_category_id}
         if redirects:  # lets the worker purge the old URLs
             event.payload = {**event.payload, "redirects": redirects}
             if redirect is not None:
@@ -382,17 +432,49 @@ async def update_post(
     return UpdateResult(await _save(session, post), public_changed, slug_changes)
 
 
-async def list_revisions(
-    session: AsyncSession, user: User, post_id: uuid.UUID, locale: str | None = None
-) -> list[PostRevision]:
+async def _revisions_viewable_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> Post:
     post = await get_post(session, post_id)
     if post.author_id != user.id and not _is_editor(user):
         raise AppError(403, "FORBIDDEN_ROLE", "You cannot view this post's revisions")
-    stmt = select(PostRevision).where(PostRevision.post_id == post_id)
+    return post
+
+
+async def list_revisions(
+    session: AsyncSession, user: User, post_id: uuid.UUID, locale: str | None = None,
+    *, limit: int = 20, offset: int = 0,
+) -> tuple[list[PostRevision], int]:
+    """One page of revisions, newest first, without content_json (get_revision has that)."""
+    await _revisions_viewable_post(session, user, post_id)
+    where = [PostRevision.post_id == post_id]
     if locale is not None:
-        stmt = stmt.where(PostRevision.locale == locale)
-    stmt = stmt.order_by(PostRevision.created_at.desc(), PostRevision.id.desc())
-    return list((await session.scalars(stmt)).all())
+        where.append(PostRevision.locale == locale)
+    total = await session.scalar(select(func.count()).select_from(PostRevision).where(*where))
+    stmt = (
+        select(PostRevision)
+        .options(defer(PostRevision.content_json))
+        .where(*where)
+        .order_by(PostRevision.created_at.desc(), PostRevision.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list((await session.scalars(stmt)).all()), total or 0
+
+
+async def _load_revision(session: AsyncSession, post_id: uuid.UUID, rev_id: int) -> PostRevision:
+    # populate_existing: a list query in the same session may have loaded this row without content_json.
+    rev = await session.scalar(
+        select(PostRevision)
+        .where(PostRevision.id == rev_id, PostRevision.post_id == post_id)
+        .execution_options(populate_existing=True)
+    )
+    if rev is None:
+        raise AppError(404, "REVISION_NOT_FOUND", "Revision not found")
+    return rev
+
+
+async def get_revision(session: AsyncSession, user: User, post_id: uuid.UUID, rev_id: int) -> PostRevision:
+    await _revisions_viewable_post(session, user, post_id)
+    return await _load_revision(session, post_id, rev_id)
 
 
 async def restore_revision(
@@ -404,9 +486,7 @@ async def restore_revision(
     translation is live. The slug is not restored: it changes only through the explicit slug field,
     which also writes redirects.
     """
-    rev = await session.get(PostRevision, rev_id)
-    if rev is None or rev.post_id != post_id:
-        raise AppError(404, "REVISION_NOT_FOUND", "Revision not found")
+    rev = await _load_revision(session, post_id, rev_id)
     data = PostUpdate(
         locale=rev.locale,
         title=rev.title,
@@ -430,7 +510,7 @@ async def submit_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> 
 
 
 async def publish_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None) -> Post:
-    """Publish a draft or in-review post (editor+; the router enforces the role).
+    """Publish a draft, in-review or scheduled post (editor+; the router enforces the role).
 
     Editors own publishing, so a draft does not need to be submitted first (decided in M2a part 2).
     Publishing publishes the translations that exist at this moment and bumps their updated_at,
@@ -438,17 +518,150 @@ async def publish_post(session: AsyncSession, post_id: uuid.UUID, if_match: str 
     """
     post = await _get_post_for_update(session, post_id)
     _check_version(post, if_match)
-    if post.status not in (PostStatus.draft, PostStatus.in_review):
+    if post.status not in (PostStatus.draft, PostStatus.in_review, PostStatus.scheduled):
         raise AppError(409, "INVALID_TRANSITION", f"Cannot publish a post that is {post.status.value}")
     now = utcnow()
+    _apply_publish(session, post, now, now)
+    return await _save(session, post)
+
+
+def _apply_publish(session: AsyncSession, post: Post, now: datetime, published_at: datetime) -> None:
+    """Shared by manual and scheduled publishing; the caller holds the row lock, checked the status and saves.
+
+    `published_at` is when the post counts as published (the scheduled time for a scheduled post);
+    updated_at is `now`, so it is never earlier than a published date.
+    """
     post.status = PostStatus.published
-    post.published_at = post.published_at or now
+    post.published_at = post.published_at or published_at
+    post.scheduled_at = None
+    _reset_schedule_state(post)
     post.updated_at = now
     for tr in post.translations:  # only the translations that exist right now
         if tr.status != TranslationStatus.published:
             tr.status = TranslationStatus.published
-            tr.published_at = now
+            tr.published_at = published_at
             tr.updated_at = now
+    session.add(_post_event("post.published", post))
+
+
+SCHEDULE_MIN_LEAD = timedelta(seconds=60)
+SCHEDULE_MAX_AHEAD = timedelta(days=365)
+SCHEDULE_LATE_GRACE = timedelta(minutes=5)  # published later than this after scheduled_at: published_at is "now"
+SCHEDULE_MAX_ATTEMPTS = 10  # after this many failed publishes the scheduler stops trying (the error stays visible)
+SCHEDULE_BACKOFF_CAP = timedelta(minutes=60)
+SCHEDULE_ERROR_MAX_LEN = 500
+
+
+def schedule_backoff(attempts: int) -> timedelta:
+    return min(timedelta(minutes=2**attempts), SCHEDULE_BACKOFF_CAP)
+
+
+def _reset_schedule_state(post: Post) -> None:
+    post.schedule_attempts = 0
+    post.schedule_last_error = None
+    post.schedule_retry_at = None
+
+
+async def schedule_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None, when: datetime) -> Post:
+    """draft | in_review | scheduled → scheduled (rescheduling allowed). Editor+; the router enforces the role."""
+    post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
+    if post.status not in (PostStatus.draft, PostStatus.in_review, PostStatus.scheduled):
+        raise AppError(409, "INVALID_TRANSITION", f"Cannot schedule a post that is {post.status.value}")
+    now = utcnow()
+    if when < now + SCHEDULE_MIN_LEAD:
+        raise AppError(422, "INVALID_SCHEDULE_TIME", "scheduled_at must be at least 60 seconds in the future")
+    if when > now + SCHEDULE_MAX_AHEAD:
+        raise AppError(422, "INVALID_SCHEDULE_TIME", "scheduled_at must be at most one year ahead")
+    post.status = PostStatus.scheduled
+    post.scheduled_at = when
+    _reset_schedule_state(post)
+    post.updated_at = now
+    return await _save(session, post)
+
+
+async def unschedule_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None) -> Post:
+    post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
+    if post.status != PostStatus.scheduled:
+        raise AppError(409, "INVALID_TRANSITION", f"Cannot unschedule a post that is {post.status.value}")
+    post.status = PostStatus.draft
+    post.scheduled_at = None
+    _reset_schedule_state(post)
+    post.updated_at = utcnow()
+    return await _save(session, post)
+
+
+async def due_post_ids(session: AsyncSession, limit: int) -> list[uuid.UUID]:
+    """Scheduled posts whose time has come, healthy ones first.
+
+    Posts that failed before are skipped while backing off and for good after SCHEDULE_MAX_ATTEMPTS, and
+    sort after never-failed posts (attempts, then scheduled time), so poison posts cannot starve the rest."""
+    now = utcnow()
+    stmt = (
+        select(Post.id)
+        .where(
+            Post.status == PostStatus.scheduled,
+            Post.scheduled_at <= now,
+            Post.schedule_attempts < SCHEDULE_MAX_ATTEMPTS,
+            or_(Post.schedule_retry_at.is_(None), Post.schedule_retry_at <= now),
+        )
+        .order_by(Post.schedule_attempts, Post.scheduled_at, Post.id)
+        .limit(limit)
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def record_schedule_failure(session: AsyncSession, post_id: uuid.UUID, exc: Exception) -> None:
+    """Count a failed scheduled publish, remember why and push the next attempt out. Commits.
+
+    Leaves updated_at alone, so editors' If-Match versions stay valid."""
+    post = await session.scalar(
+        select(Post)
+        .where(Post.id == post_id, Post.status == PostStatus.scheduled)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if post is None:
+        return
+    post.schedule_attempts += 1
+    post.schedule_last_error = f"{type(exc).__name__}: {exc}"[:SCHEDULE_ERROR_MAX_LEN]
+    post.schedule_retry_at = utcnow() + schedule_backoff(post.schedule_attempts)
+    await session.commit()
+
+
+async def publish_due_post(session: AsyncSession, post_id: uuid.UUID) -> Post | None:
+    """Internal (no If-Match): publish one scheduled post whose time has come, committing in the caller's session.
+
+    Returns None when the post is no longer due (published, unscheduled, rescheduled) or another
+    worker holds its row lock (SKIP LOCKED), so overlapping runs never double-publish.
+    A post published more than SCHEDULE_LATE_GRACE after its time counts as published now.
+    """
+    stmt = (
+        select(Post)
+        .where(Post.id == post_id, Post.status == PostStatus.scheduled, Post.scheduled_at <= utcnow())
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
+    )
+    post = await session.scalar(stmt)
+    if post is None:
+        return None
+    now = utcnow()
+    due = post.scheduled_at
+    _apply_publish(session, post, now, due if now - due <= SCHEDULE_LATE_GRACE else now)
+    return await _save(session, post)
+
+
+async def unarchive_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None) -> Post:
+    """archived → published. Translation statuses were kept on unpublish, so published ones are visible again."""
+    post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
+    if post.status != PostStatus.archived:
+        raise AppError(409, "INVALID_TRANSITION", f"Cannot unarchive a post that is {post.status.value}")
+    if not any(t.status == TranslationStatus.published for t in post.translations):
+        raise AppError(409, "NO_PUBLISHED_TRANSLATION", "No translation is published; publish one before unarchiving")
+    post.status = PostStatus.published
+    post.updated_at = utcnow()
     session.add(_post_event("post.published", post))
     return await _save(session, post)
 
@@ -472,9 +685,12 @@ async def publish_translation(session: AsyncSession, post_id: uuid.UUID, locale:
     return await _save(session, post)
 
 
-async def send_back_post(session: AsyncSession, editor: User, post_id: uuid.UUID, note: str | None) -> Post:
+async def send_back_post(
+    session: AsyncSession, editor: User, post_id: uuid.UUID, if_match: str | None, note: str | None
+) -> Post:
     """in_review → draft, so the reporter can edit again. The note travels in the outbox payload."""
     post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
     if post.status != PostStatus.in_review:
         raise AppError(409, "INVALID_TRANSITION", f"Cannot send back a post that is {post.status.value}")
     post.status = PostStatus.draft
@@ -492,7 +708,7 @@ async def send_back_post(session: AsyncSession, editor: User, post_id: uuid.UUID
 
 
 async def unpublish_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None) -> Post:
-    """published → archived. Translations keep their status (unarchive is M2b)."""
+    """published → archived. Translations keep their status, so unarchive can restore them."""
     post = await _get_post_for_update(session, post_id)
     _check_version(post, if_match)
     if post.status != PostStatus.published:

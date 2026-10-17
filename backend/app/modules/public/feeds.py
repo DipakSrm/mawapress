@@ -4,8 +4,17 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.core.storage import get_storage
+from app.modules.media.models import Media
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
-from app.modules.public.schemas import CategoryFeedOut, HomeCategoryBlock, HomeOut, PublicCard, PublicCategory
+from app.modules.public.schemas import (
+    CategoryFeedOut,
+    HomeCategoryBlock,
+    HomeOut,
+    PublicCard,
+    PublicCategory,
+    PublicImage,
+)
 from app.modules.seo.generator import truncate_words
 from app.modules.taxonomy import service as taxonomy_service
 from app.modules.taxonomy.models import Category
@@ -19,7 +28,27 @@ def card_excerpt(excerpt: str | None, body_text: str) -> str:
     return excerpt or truncate_words(body_text, EXCERPT_LEN)
 
 
+def image_alt(locale: str, media: Media, title: str) -> str:
+    return (media.alt_ne if locale == "ne" else media.alt_en) or media.caption or title
+
+
+def public_image(locale: str, media: Media | None, title: str) -> PublicImage | None:
+    if media is None:
+        return None
+    return PublicImage(
+        url=media.url, width=media.width, height=media.height,
+        alt=image_alt(locale, media, title), variants=media.variants,
+    )
+
+
+def visible(locale: str | None = None) -> list:
+    """The one public-visibility rule: a published translation of a published post (optionally one locale)."""
+    rules = [PostTranslation.status == TranslationStatus.published, Post.status == PostStatus.published]
+    return rules if locale is None else [PostTranslation.locale == locale, *rules]
+
+
 def card_query(locale: str) -> Select:
+    alt_col = Media.alt_ne if locale == "ne" else Media.alt_en
     return (
         select(
             Post.id,
@@ -31,16 +60,18 @@ def card_query(locale: str) -> Select:
             Category.slug.label("category_slug"),
             User.name.label("author_name"),
             PUBLISHED_AT.label("published_at"),
+            Media.key.label("media_key"),
+            Media.width.label("media_width"),
+            Media.height.label("media_height"),
+            Media.variant_keys.label("media_variant_keys"),
+            func.coalesce(func.nullif(alt_col, ""), func.nullif(Media.caption, ""), PostTranslation.title).label("media_alt"),
         )
         .select_from(PostTranslation)
         .join(Post, Post.id == PostTranslation.post_id)
         .join(Category, Category.id == Post.category_id)
         .join(User, User.id == Post.author_id)
-        .where(
-            PostTranslation.locale == locale,
-            PostTranslation.status == TranslationStatus.published,
-            Post.status == PostStatus.published,
-        )
+        .outerjoin(Media, Media.id == Post.featured_media_id)
+        .where(*visible(locale))
     )
 
 
@@ -53,6 +84,10 @@ def to_card(row) -> PublicCard:
         category_slug=row.category_slug,
         author_name=row.author_name,
         published_at=row.published_at,
+        image=None if row.media_key is None else PublicImage(
+            url=get_storage().url(row.media_key), width=row.media_width, height=row.media_height,
+            alt=row.media_alt, variants={n: get_storage().url(k) for n, k in row.media_variant_keys.items()},
+        ),
     )
 
 

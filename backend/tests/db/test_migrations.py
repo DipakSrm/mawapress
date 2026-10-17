@@ -159,3 +159,31 @@ async def test_upgrade_backfills_body_text_and_search_vector():
 
     assert tuple(row) == ("Rain & wind", None, True, False)
     assert breaking is False
+
+
+async def test_upgrade_gives_existing_users_token_version_zero():
+    with PostgresContainer("postgres:17-alpine", driver="asyncpg") as pg:
+        url = pg.get_connection_url()
+        env = {**os.environ, "MAWA_DATABASE_URL": url}
+        assert _alembic(env, "upgrade", "8b0d2f4a6c75").returncode == 0
+        eng = create_async_engine(url)
+        try:
+            async with eng.begin() as conn:
+                await conn.execute(text(
+                    "INSERT INTO users (id, email, password_hash, name, role) "
+                    "VALUES ('00000000-0000-0000-0000-000000000001', 'e@mawapress.com', 'x', 'E', 'editor')"
+                ))
+            after = _alembic(env, "upgrade", "head")
+            assert after.returncode == 0, after.stderr
+            async with eng.begin() as conn:
+                version = await conn.scalar(text("SELECT token_version FROM users"))
+        finally:
+            await eng.dispose()
+    assert version == 0
+
+
+def test_old_migrations_do_not_import_live_application_code():
+    # A migration must keep doing what it did when it shipped, so it may not depend on app code
+    # that later revisions of the app are free to change.
+    migration = Path(__file__).resolve().parents[2] / "migrations" / "versions" / "6f8b0d2e4a53_cards_and_search.py"
+    assert "app.modules" not in migration.read_text(encoding="utf-8")

@@ -1,3 +1,4 @@
+import re
 from typing import NamedTuple
 
 from sqlalchemy import delete, update
@@ -7,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.seo.models import Redirect
 
 PERMANENT = 301
+MAX_PATH_LENGTH = 300  # redirects.from_path / to_path are String(300)
+ARTICLE_PATH = re.compile(r"/(ne|en)/[a-z0-9-]+/[a-z0-9-]+")
 
 
 class SlugChange(NamedTuple):
@@ -45,3 +48,20 @@ async def record_slug_change(session: AsyncSession, old_path: str, new_path: str
 
 async def resolve_redirect(session: AsyncSession, path: str) -> Redirect | None:
     return await session.get(Redirect, path)
+
+
+def normalize_article_path(path: str) -> str | None:
+    """Canonical form of a requested path, or None when it cannot be an article path.
+
+    Drops the query string and fragment, collapses duplicate slashes, removes one trailing slash
+    (the root keeps its own) and lower-cases the locale segment only: slugs are case-sensitive.
+    """
+    path = path.split("#", 1)[0].split("?", 1)[0]
+    path = re.sub(r"/{2,}", "/", path)
+    if len(path) > 1 and path.endswith("/"):
+        path = path[:-1]
+    parts = path.split("/")
+    if len(parts) > 1:
+        parts[1] = parts[1].lower()
+    path = "/".join(parts)
+    return path if ARTICLE_PATH.fullmatch(path) else None

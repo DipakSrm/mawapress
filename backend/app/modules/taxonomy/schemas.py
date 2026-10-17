@@ -3,7 +3,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 Text120 = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
-SlugIn = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+SlugIn = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]  # length is checked in the service (INVALID_SLUG)
 Sort = Annotated[int, Field(ge=-10000, le=10000)]
 
 
