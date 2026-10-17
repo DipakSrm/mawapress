@@ -42,6 +42,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"MAWA_JWT_SECRET must be set to at least {MIN_JWT_SECRET_LENGTH} random characters when env is not 'dev'"
             )
+        if self.storage not in ("local", "s3"):
+            raise ValueError("MAWA_STORAGE must be 'local' or 's3'")
+        if self.storage == "s3":
+            required = ("s3_endpoint", "s3_bucket", "s3_access_key", "s3_secret_key", "media_base_url")
+            missing = [f"MAWA_{n.upper()}" for n in required if not getattr(self, n)]
+            if missing:
+                raise ValueError(f"MAWA_STORAGE=s3 requires {', '.join(missing)}")
         if self.env != "dev" and not self.cookie_secure:
             raise ValueError("MAWA_COOKIE_SECURE must be true when env is not 'dev'")
         return self

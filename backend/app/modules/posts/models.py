@@ -53,6 +53,7 @@ class Post(Base):
     __table_args__ = (
         Index("ix_posts_status_published_at", "status", "published_at"),
         Index("ix_posts_category_published_at", "category_id", "published_at"),
+        Index("ix_posts_featured_media_id", "featured_media_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)

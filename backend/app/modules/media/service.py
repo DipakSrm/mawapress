@@ -12,7 +12,7 @@ from app.modules.auth.deps import ROLE_RANK
 from app.modules.media.models import Media
 from app.modules.media.processing import NotAnImage, TooManyPixels, clean_upload
 from app.modules.media.schemas import MediaPatch
-from app.modules.media.variants import variant_key
+from app.modules.posts import service as posts_service
 from app.modules.posts.models import Post
 from app.modules.users.models import Role, User
 
@@ -34,7 +34,7 @@ async def upload(session: AsyncSession, storage: Storage, user: User, raw: bytes
     await storage.put(key, cleaned.data, cleaned.mime)
     media = Media(
         id=media_id, key=key, mime=cleaned.mime, width=cleaned.width, height=cleaned.height,
-        size_bytes=len(cleaned.data), uploader_id=user.id, variants={},
+        size_bytes=len(cleaned.data), uploader_id=user.id, variant_keys={},
     )
     session.add(media)
     try:
@@ -66,21 +66,36 @@ async def list_media(session: AsyncSession, *, q: str | None, limit: int, offset
     return list(rows), total or 0
 
 
-async def patch_media(session: AsyncSession, user: User, media_id: uuid.UUID, data: MediaPatch) -> Media:
+async def patch_media(
+    session: AsyncSession, user: User, media_id: uuid.UUID, data: MediaPatch
+) -> tuple[Media, list[Post]]:
+    """Returns the media and the live posts whose public pages changed (the caller invalidates their caches)."""
     media = await get_media(session, media_id)
     if media.uploader_id != user.id and ROLE_RANK[user.role] < ROLE_RANK[Role.editor]:
         raise AppError(403, "FORBIDDEN_ROLE", "You cannot edit this media")
+    changed = False
     for field in data.model_fields_set:
-        setattr(media, field, getattr(data, field))
+        if getattr(media, field) != getattr(data, field):
+            setattr(media, field, getattr(data, field))
+            changed = True
+    live: list[Post] = []
+    if changed:  # alt and caption show on cards and pages, not in seo_auto
+        live = await posts_service.touch_posts_for_media(session, media_id, refresh_seo=False)
     await session.commit()
-    return media
+    return media, live
 
 
 async def delete_media(session: AsyncSession, storage: Storage, media_id: uuid.UUID) -> None:
-    media = await get_media(session, media_id)
+    # Lock the row first: post create/update take FOR SHARE on it, so no post can adopt this media
+    # between the in-use check and the delete (the FK's SET NULL would silently drop its image).
+    media = await session.scalar(
+        select(Media).where(Media.id == media_id).with_for_update().execution_options(populate_existing=True)
+    )
+    if media is None:
+        raise AppError(404, "MEDIA_NOT_FOUND", "Media not found")
     if await session.scalar(select(exists().where(Post.featured_media_id == media_id))):
         raise AppError(409, "MEDIA_IN_USE", "This media is the featured image of a post")
-    keys = [media.key, *(variant_key(media.key, name) for name in media.variants)]
+    keys = [media.key, *media.variant_keys.values()]
     await session.delete(media)
     await session.commit()
     for key in keys:  # the row is gone; a leftover file is garbage, not an error

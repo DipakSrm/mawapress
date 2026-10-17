@@ -3,7 +3,7 @@
 import io
 from dataclasses import dataclass
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps, ImageSequence, UnidentifiedImageError
 
 MAX_PIXELS = 40_000_000  # decompression-bomb guard (a 40 MP photo is ~160 MB decoded)
 # Pillow format name -> (file extension, content type)
@@ -12,7 +12,10 @@ ALLOWED_FORMATS = {
     "PNG": ("png", "image/png"),
     "WEBP": ("webp", "image/webp"),
     "GIF": ("gif", "image/gif"),
+    "MPO": ("jpg", "image/jpeg"),  # multi-picture JPEG, what phones produce; only the first frame is kept
 }
+MAX_GIF_FRAMES = 300
+MAX_GIF_PIXELS = 100_000_000  # across all frames
 VARIANT_WIDTHS = (320, 640, 1024, 1600)
 OG_SIZE = (1200, 630)
 
@@ -51,18 +54,38 @@ def clean_upload(raw: bytes) -> Cleaned:
     ext, mime = ALLOWED_FORMATS[fmt]
     out = io.BytesIO()
     if fmt == "GIF":
-        # Re-saving drops comments; keep the animation.
         frames = getattr(img, "n_frames", 1)
-        img.save(out, "GIF", save_all=frames > 1, loop=img.info.get("loop", 0), duration=img.info.get("duration", 100))
+        if frames > MAX_GIF_FRAMES or frames * img.width * img.height > MAX_GIF_PIXELS:
+            raise TooManyPixels
+        if frames == 1:
+            img.save(out, "GIF")
+        else:
+            # Re-saving drops comments; keep the animation and every frame's own duration.
+            loop = img.info.get("loop", 0)
+            decoded, durations = [], []
+            for frame in ImageSequence.Iterator(img):
+                durations.append(frame.info.get("duration", 100))
+                decoded.append(frame.copy())
+            decoded[0].save(out, "GIF", save_all=True, append_images=decoded[1:], duration=durations, loop=loop)
         return Cleaned(out.getvalue(), ext, mime, img.width, img.height)
     img = ImageOps.exif_transpose(img)  # bake the orientation in before the EXIF is dropped
-    if fmt == "JPEG":
-        img.save(out, "JPEG", quality=92, optimize=True)
+    if fmt in ("JPEG", "MPO"):
+        img.save(out, "JPEG", quality=92, optimize=True)  # an MPO saves as its first frame
     elif fmt == "PNG":
         img.save(out, "PNG", optimize=True)
     else:
         img.save(out, "WEBP", quality=92)
     return Cleaned(out.getvalue(), ext, mime, img.width, img.height)
+
+
+def og_size(width: int, height: int) -> tuple[int, int]:
+    """Largest 1200:630 crop that fits the source, never above 1200x630 (so never an upscale)."""
+    ow, oh = OG_SIZE
+    if width * oh <= height * ow:  # width-limited
+        w = min(width, ow)
+        return w, max(1, w * oh // ow)
+    h = min(height, oh)
+    return max(1, h * ow // oh), h
 
 
 def _webp(img: Image.Image) -> bytes:
@@ -82,5 +105,5 @@ def render_variants(raw: bytes) -> dict[str, bytes]:
         if width <= img.width:
             height = max(1, round(img.height * width / img.width))
             out[f"w{width}"] = _webp(img.resize((width, height), Image.LANCZOS))
-    out["og"] = _webp(ImageOps.fit(img, OG_SIZE, Image.LANCZOS))
+    out["og"] = _webp(ImageOps.fit(img, og_size(img.width, img.height), Image.LANCZOS))
     return out

@@ -95,14 +95,9 @@ class S3Storage:
 @lru_cache
 def get_storage() -> Storage:
     s = get_settings()
-    if s.storage == "s3":
-        missing = [n for n in ("s3_endpoint", "s3_bucket", "s3_access_key", "s3_secret_key") if not getattr(s, n)]
-        if missing:
-            raise RuntimeError(f"MAWA_STORAGE=s3 needs {', '.join('MAWA_' + n.upper() for n in missing)}")
+    if s.storage == "s3":  # Settings has already refused to load without every s3 value
         return S3Storage(
             endpoint=s.s3_endpoint, bucket=s.s3_bucket, access_key=s.s3_access_key,
             secret_key=s.s3_secret_key, base_url=s.media_base_url,
         )
-    if s.storage != "local":
-        raise RuntimeError(f"MAWA_STORAGE must be 'local' or 's3', got {s.storage!r}")
     return LocalStorage(s.media_local_dir, s.media_base_url)

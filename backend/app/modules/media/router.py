@@ -1,8 +1,10 @@
 import uuid
 
 from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import get_redis
 from app.core.jobs import Enqueuer, enqueue_quietly, get_enqueuer
 from app.core.storage import MAX_UPLOAD_BYTES, Storage, get_storage
 from app.db.session import get_session
@@ -10,6 +12,7 @@ from app.modules.auth.deps import require_role
 from app.modules.media import service
 from app.modules.media.models import Media
 from app.modules.media.schemas import MediaListOut, MediaOut, MediaPatch
+from app.modules.public.service import invalidate_public
 from app.modules.users.models import Role, User
 
 router = APIRouter(prefix="/api/media", tags=["media"])
@@ -45,9 +48,16 @@ async def list_media(
 
 @router.patch("/{media_id}", response_model=MediaOut)
 async def patch_media(
-    media_id: uuid.UUID, body: MediaPatch, user: User = Depends(any_staff), session: AsyncSession = Depends(get_session)
+    media_id: uuid.UUID,
+    body: MediaPatch,
+    user: User = Depends(any_staff),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
 ) -> Media:
-    return await service.patch_media(session, user, media_id, body)
+    media, live_posts = await service.patch_media(session, user, media_id, body)
+    for post in live_posts:
+        await invalidate_public(redis, post)
+    return media
 
 
 @router.delete("/{media_id}", status_code=204)

@@ -117,6 +117,21 @@ async def _refresh_all_seo(session: AsyncSession, post: Post) -> None:
         tr.seo_auto = meta.to_dict()
 
 
+async def touch_posts_for_media(session: AsyncSession, media_id: uuid.UUID, *, refresh_seo: bool) -> list[Post]:
+    """A featured media's public data changed: refresh seo_auto (when it feeds in) and queue `post.updated`
+    for the live posts using it. Returns those live posts so the caller can invalidate caches after commit.
+    Does not bump updated_at, so editors' If-Match versions stay valid."""
+    posts = (await session.scalars(select(Post).where(Post.featured_media_id == media_id))).all()
+    live: list[Post] = []
+    for post in posts:
+        if refresh_seo:
+            await _refresh_all_seo(session, post)
+        if post.status == PostStatus.published:
+            session.add(_post_event("post.updated", post))
+            live.append(post)
+    return live
+
+
 async def _save(session: AsyncSession, post: Post) -> Post:
     await session.flush()
     await _refresh_all_seo(session, post)
@@ -170,7 +185,10 @@ async def _flush_with_slug_retry(
 async def _get_featured_media(session: AsyncSession, media_id: uuid.UUID | None) -> Media | None:
     if media_id is None:
         return None
-    media = await session.get(Media, media_id)
+    # FOR SHARE: a concurrent media DELETE (FOR UPDATE) must wait for this transaction, then see the post.
+    media = await session.scalar(
+        select(Media).where(Media.id == media_id).with_for_update(read=True).execution_options(populate_existing=True)
+    )
     if media is None:
         raise AppError(422, "MEDIA_NOT_FOUND", "Featured image does not exist")
     return media

@@ -57,7 +57,7 @@ def card_query(locale: str) -> Select:
             Media.key.label("media_key"),
             Media.width.label("media_width"),
             Media.height.label("media_height"),
-            Media.variants.label("media_variants"),
+            Media.variant_keys.label("media_variant_keys"),
             func.coalesce(func.nullif(alt_col, ""), func.nullif(Media.caption, ""), PostTranslation.title).label("media_alt"),
         )
         .select_from(PostTranslation)
@@ -84,7 +84,7 @@ def to_card(row) -> PublicCard:
         published_at=row.published_at,
         image=None if row.media_key is None else PublicImage(
             url=get_storage().url(row.media_key), width=row.media_width, height=row.media_height,
-            alt=row.media_alt, variants=row.media_variants,
+            alt=row.media_alt, variants={n: get_storage().url(k) for n, k in row.media_variant_keys.items()},
         ),
     )
 
