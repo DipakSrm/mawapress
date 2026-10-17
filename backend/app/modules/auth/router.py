@@ -11,6 +11,7 @@ from app.core import ratelimit
 from app.core.cache import get_redis
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.core.jobs import Enqueuer, enqueue_quietly, get_enqueuer
 from app.db.session import get_session
 from app.modules.auth.deps import current_user
 from app.modules.auth import service
@@ -142,11 +143,14 @@ async def update_me(
     response: Response,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
+    enqueue: Enqueuer = Depends(get_enqueuer),
 ) -> MeUpdateOut:
     """A password change revokes every session; this one is replaced with a fresh token family
     (new refresh and CSRF cookies, new access token in the body) so the caller stays signed in."""
     user = await users_service.update_me(session, user, body)
     out = MeUpdateOut.model_validate(user)
+    if body.name is not None:  # stored SEO embeds the author name; refresh it off-request
+        await enqueue_quietly(enqueue, "refresh_seo_for", "user", str(user.id))
     if body.new_password is not None:
         _set_session_cookies(response, await service.issue_refresh_token(session, user))
         out.access_token = create_access_token(user.id, user.role.value, user.token_version)

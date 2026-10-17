@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.jobs import Enqueuer, enqueue_quietly, get_enqueuer
 from app.db.session import get_session
 from app.modules.auth.deps import require_role
 from app.modules.users import service
@@ -27,9 +28,16 @@ async def create_user(
 
 @router.patch("/{user_id}", response_model=UserOut)
 async def update_user(
-    user_id: uuid.UUID, body: UserUpdate, admin: User = Depends(admins), session: AsyncSession = Depends(get_session)
+    user_id: uuid.UUID,
+    body: UserUpdate,
+    admin: User = Depends(admins),
+    session: AsyncSession = Depends(get_session),
+    enqueue: Enqueuer = Depends(get_enqueuer),
 ) -> User:
-    return await service.update_user(session, admin, user_id, body)
+    user = await service.update_user(session, admin, user_id, body)
+    if body.name is not None:  # stored SEO embeds the author name; refresh it off-request
+        await enqueue_quietly(enqueue, "refresh_seo_for", "user", str(user.id))
+    return user
 
 
 @router.post("/{user_id}/password", status_code=204)

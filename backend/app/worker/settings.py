@@ -14,6 +14,7 @@ from app.modules.media.variants import make_variants
 from app.worker.maintenance import purge_refresh_tokens
 from app.worker.outbox import CRON_TIMEOUT_SECONDS, new_http_client, process_outbox
 from app.worker.scheduler import SCHEDULER_TIMEOUT_SECONDS, publish_due_posts
+from app.worker.seo import refresh_seo_for
 from app.worker.views import FLUSH_TIMEOUT_SECONDS, flush_views
 
 
@@ -32,7 +33,7 @@ async def shutdown(ctx: dict) -> None:
 
 
 class WorkerSettings:
-    functions: list = [make_variants]
+    functions: list = [make_variants, refresh_seo_for]
     cron_jobs = [
         # Ticks may overlap (unique only dedupes the same tick); the outbox lease makes that safe.
         cron(process_outbox, second=set(range(0, 60, 10)), run_at_startup=True, timeout=CRON_TIMEOUT_SECONDS),

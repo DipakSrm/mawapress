@@ -3,6 +3,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import get_redis
+from app.core.jobs import Enqueuer, enqueue_quietly, get_enqueuer
 from app.db.session import get_session
 from app.modules.auth.deps import require_role
 from app.modules.public.service import invalidate_feeds
@@ -40,9 +41,12 @@ async def update_category(
     user: User = Depends(editors),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
+    enqueue: Enqueuer = Depends(get_enqueuer),
 ) -> Category:
     cat = await service.update_category(session, cat_id, body)
     await invalidate_feeds(redis)
+    if body.name_ne is not None or body.name_en is not None:  # stored SEO embeds the name; refresh it off-request
+        await enqueue_quietly(enqueue, "refresh_seo_for", "category", str(cat.id))
     return cat
 
 

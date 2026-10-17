@@ -11,6 +11,7 @@ from testcontainers.community.postgres import PostgresContainer
 os.environ.setdefault("MAWA_COOKIE_SECURE", "false")  # the test client talks plain http
 
 from app.core.cache import get_redis
+from app.core.jobs import get_enqueuer
 from app.db.models import Base
 from app.db.session import get_session
 from app.main import create_app
@@ -57,10 +58,21 @@ async def fake_redis():
     await r.aclose()
 
 
+@pytest.fixture
+def jobs():
+    """(name, args) of every background job the API enqueued."""
+    return []
+
+
 @pytest_asyncio.fixture
-async def client(session, fake_redis):
+async def client(session, fake_redis, jobs):
     app = create_app()
+
+    async def enqueue(name, *args):
+        jobs.append((name, args))
+
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_redis] = lambda: fake_redis
+    app.dependency_overrides[get_enqueuer] = lambda: enqueue
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
