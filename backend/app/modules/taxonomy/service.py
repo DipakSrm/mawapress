@@ -9,6 +9,7 @@ from app.modules.taxonomy.models import Category, Tag
 from app.modules.taxonomy.schemas import CategoryCreate, CategoryNode, CategoryUpdate, TagCreate, TagUpdate
 
 MAX_CATEGORY_DEPTH = 3  # root = 1
+CATEGORY_SLUG_CONSTRAINT = "categories_slug_key"  # PostgreSQL's default name for the unique slug column
 
 
 def _slug_taken() -> AppError:
@@ -92,6 +93,8 @@ async def create_category(session: AsyncSession, data: CategoryCreate) -> Catego
             session.add(cat)
             await session.flush()
     except IntegrityError as exc:
+        if CATEGORY_SLUG_CONSTRAINT not in str(exc.orig):
+            raise  # the global handler answers 409 CONFLICT
         raise _slug_taken() from exc
     await session.commit()
     return cat

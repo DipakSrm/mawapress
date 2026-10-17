@@ -188,3 +188,29 @@ async def test_public_post_changes_bump_feed_generation(client, session, fake_re
     )
     assert r.status_code == 200
     assert await fake_redis.get(FEED_GEN_KEY) == "2"
+
+
+async def test_create_race_on_a_non_slug_constraint_is_a_conflict_not_slug_taken(client, session, monkeypatch):
+    """The parent vanishes between the check and the INSERT: an FK violation, not a taken slug."""
+    from app.modules.taxonomy import service
+
+    monkeypatch.setattr(service, "_check_parent", lambda *args, **kwargs: None)
+    editor = await make_user(session, role=Role.editor)
+    r = await create_cat(client, editor, slug="orphan", parent_id=999999)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "CONFLICT"
+
+
+async def test_create_race_on_the_slug_constraint_is_slug_taken(client, session, monkeypatch):
+    from app.modules.taxonomy import service
+
+    await make_category(session, slug="sports")
+
+    async def stale(_session):
+        return {}  # the other request's row is not visible yet
+
+    monkeypatch.setattr(service, "all_categories", stale)
+    editor = await make_user(session, role=Role.editor)
+    r = await create_cat(client, editor, slug="sports")
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "SLUG_TAKEN"
