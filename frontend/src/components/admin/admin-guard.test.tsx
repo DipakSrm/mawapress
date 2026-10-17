@@ -1,4 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import {
   admin,
@@ -9,6 +11,7 @@ import {
   renderWithSession,
   reporter,
   router,
+  server,
   setupAdminTest,
 } from "@/test/admin";
 import { AdminGuard } from "./admin-guard";
@@ -36,6 +39,17 @@ describe("admin guard", () => {
       expect(router.replace).toHaveBeenCalledWith("/admin/login?next=%2Fadmin%2Fposts"),
     );
     expect(screen.queryByText("secret page")).not.toBeInTheDocument();
+  });
+
+  it("shows a retryable error instead of redirecting when the server is unreachable", async () => {
+    server.use(http.post("*/api/auth/refresh", () => HttpResponse.error()));
+    nav.pathname = "/admin/posts";
+    renderWithSession(page);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not check your session");
+    expect(router.replace).not.toHaveBeenCalled();
+    mockSignedIn(editor);
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("secret page")).toBeInTheDocument();
   });
 
   it("renders the page inside the shell once signed in", async () => {

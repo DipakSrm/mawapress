@@ -1,8 +1,9 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
+import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { getAccessToken } from "@/lib/api";
+import { expireSession, getAccessToken } from "@/lib/api";
 import {
   admin,
   mockSignedIn,
@@ -23,7 +24,7 @@ vi.mock("next/navigation", async () =>
 setupAdminTest();
 
 function Probe() {
-  const { status, user, role, hasRole, login, logout } = useSession();
+  const { status, user, role, hasRole, login, logout, retry } = useSession();
   return (
     <div>
       <p data-testid="status">{status}</p>
@@ -31,6 +32,7 @@ function Probe() {
       <p data-testid="editor">{String(hasRole("editor"))}</p>
       <button onClick={() => void login("a@b.c", "pw").catch(() => {})}>login</button>
       <button onClick={() => void logout()}>logout</button>
+      <button onClick={retry}>retry</button>
     </div>
   );
 }
@@ -115,5 +117,92 @@ describe("session provider", () => {
     expect(getAccessToken()).toBeNull();
     expect(screen.getByTestId("who")).toHaveTextContent("nobody");
     document.cookie = "mawa_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+  });
+
+  it("redirects to login when the API client reports auth:expired", async () => {
+    mockSignedIn(admin);
+    nav.pathname = "/admin/posts";
+    window.history.replaceState(null, "", "/admin/posts");
+    renderWithSession(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent(/^authenticated$/));
+    act(() => expireSession());
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent(/^unauthenticated$/),
+    );
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/admin/login?next=%2Fadmin%2Fposts"),
+    );
+  });
+
+  it("calls refresh once under StrictMode's double mount", async () => {
+    let refreshes = 0;
+    mockSignedIn(admin);
+    server.use(
+      http.post("*/api/auth/refresh", () => {
+        refreshes++;
+        return HttpResponse.json({ access_token: "tok" });
+      }),
+    );
+    renderWithSession(
+      <StrictMode>
+        <Probe />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent(/^authenticated$/));
+    expect(refreshes).toBe(1);
+  });
+
+  it("explicit logout goes to plain /admin/login without next", async () => {
+    mockSignedIn(admin);
+    nav.pathname = "/admin/posts";
+    window.history.replaceState(null, "", "/admin/posts?status=draft");
+    server.use(http.post("*/api/auth/logout", () => new HttpResponse(null, { status: 204 })));
+    renderWithSession(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent(/^authenticated$/));
+    await userEvent.click(screen.getByText("logout"));
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/admin/login"));
+    expect(router.replace).not.toHaveBeenCalledWith(expect.stringContaining("next="));
+  });
+
+  it("shows an error state, not a redirect, on a network failure; retry recovers", async () => {
+    server.use(http.post("*/api/auth/refresh", () => HttpResponse.error()));
+    nav.pathname = "/admin/posts";
+    renderWithSession(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent(/^error$/));
+    expect(router.replace).not.toHaveBeenCalled();
+    mockSignedIn(admin);
+    await userEvent.click(screen.getByText("retry"));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent(/^authenticated$/));
+  });
+
+  it("treats a 5xx from /me as an error state, not a sign-out", async () => {
+    server.use(
+      http.post("*/api/auth/refresh", () => HttpResponse.json({ access_token: "tok" })),
+      http.get("*/api/auth/me", () =>
+        HttpResponse.json(
+          { error: { code: "INTERNAL", message: "x", details: {} } },
+          { status: 503 },
+        ),
+      ),
+    );
+    nav.pathname = "/admin/posts";
+    renderWithSession(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent(/^error$/));
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
+  it("treats a 5xx from refresh as an error state", async () => {
+    server.use(
+      http.post("*/api/auth/refresh", () =>
+        HttpResponse.json(
+          { error: { code: "INTERNAL", message: "x", details: {} } },
+          { status: 502 },
+        ),
+      ),
+    );
+    nav.pathname = "/admin/posts";
+    renderWithSession(<Probe />);
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent(/^error$/));
+    expect(router.replace).not.toHaveBeenCalled();
   });
 });

@@ -12,13 +12,21 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, getAccessToken, onAuthExpired, setAccessToken, type components } from "@/lib/api";
+import {
+  api,
+  getAccessToken,
+  isApiError,
+  onAuthExpired,
+  setAccessToken,
+  type components,
+} from "@/lib/api";
 import { readCsrfCookie } from "@/lib/api/session";
 import { LOGIN_PATH, loginUrl } from "./next-path";
 import { roleAtLeast, type Role } from "./roles";
 
 export type SessionUser = components["schemas"]["MeOut"];
-export type SessionStatus = "loading" | "authenticated" | "unauthenticated";
+/** `error`: the session could not be checked (network down or server error); the user may retry. */
+export type SessionStatus = "loading" | "authenticated" | "unauthenticated" | "error";
 
 interface SessionContextValue {
   status: SessionStatus;
@@ -26,6 +34,8 @@ interface SessionContextValue {
   role: Role | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** Re-run the session restore after a status of `error`. */
+  retry: () => void;
   hasRole: (min: Role) => boolean;
 }
 
@@ -35,13 +45,20 @@ async function fetchMe(): Promise<SessionUser> {
   return api.get<SessionUser>("/api/auth/me");
 }
 
+type RestoreResult = { kind: "ok"; user: SessionUser } | { kind: "signed-out" } | { kind: "error" };
+
+/** A failure that says nothing about whether the session is valid. */
+function isTransient(e: unknown): boolean {
+  return !isApiError(e) || e.status === 0 || e.status >= 500;
+}
+
 /** Restore a session from the refresh cookie (or the in-memory token when one exists). */
-async function restore(): Promise<SessionUser | null> {
+async function restore(): Promise<RestoreResult> {
   try {
     if (!getAccessToken()) await api.refresh();
-    return await fetchMe();
-  } catch {
-    return null;
+    return { kind: "ok", user: await fetchMe() };
+  } catch (e) {
+    return isTransient(e) ? { kind: "error" } : { kind: "signed-out" };
   }
 }
 
@@ -51,7 +68,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<SessionStatus>("loading");
   const [user, setUser] = useState<SessionUser | null>(null);
-  const boot = useRef<Promise<SessionUser | null> | null>(null);
+  const boot = useRef<Promise<RestoreResult> | null>(null);
+  const mounted = useRef(false);
+  const explicitLogout = useRef(false);
 
   const clear = useCallback(() => {
     setUser(null);
@@ -59,24 +78,34 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     queryClient.clear();
   }, [queryClient]);
 
-  // Silent restore on mount. The ref keeps React strict-mode's double effect to one refresh.
-  useEffect(() => {
-    let active = true;
-    boot.current ??= restore();
-    void boot.current.then((me) => {
-      if (!active) return;
-      if (me) {
-        setUser(me);
+  const apply = useCallback((pending: Promise<RestoreResult>) => {
+    void pending.then((result) => {
+      if (!mounted.current) return;
+      if (result.kind === "ok") {
+        setUser(result.user);
         setStatus("authenticated");
       } else {
         setUser(null);
-        setStatus("unauthenticated");
+        setStatus(result.kind === "error" ? "error" : "unauthenticated");
       }
     });
-    return () => {
-      active = false;
-    };
   }, []);
+
+  // Silent restore on mount. The ref keeps React strict-mode's double effect to one refresh.
+  useEffect(() => {
+    mounted.current = true;
+    boot.current ??= restore();
+    apply(boot.current);
+    return () => {
+      mounted.current = false;
+    };
+  }, [apply]);
+
+  const retry = useCallback(() => {
+    setStatus("loading");
+    boot.current = restore();
+    apply(boot.current);
+  }, [apply]);
 
   // The API client emits this when a refresh fails; the redirect itself happens below.
   useEffect(() => onAuthExpired(clear), [clear]);
@@ -84,7 +113,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (status !== "unauthenticated" || pathname === LOGIN_PATH) return;
     const search = typeof window === "undefined" ? "" : window.location.search;
-    router.replace(loginUrl(pathname + search));
+    // An explicit log-out lands on the plain login page; an expiry remembers where the user was.
+    router.replace(explicitLogout.current ? LOGIN_PATH : loginUrl(pathname + search));
   }, [status, pathname, router]);
 
   const login = useCallback(async (email: string, password: string) => {
@@ -94,6 +124,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       { auth: false },
     );
     setAccessToken(access_token);
+    explicitLogout.current = false;
     try {
       const me = await fetchMe();
       setUser(me);
@@ -105,6 +136,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
+    explicitLogout.current = true;
     try {
       const csrf = readCsrfCookie();
       await api.post(
@@ -127,9 +159,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       role: user?.role ?? null,
       login,
       logout,
+      retry,
       hasRole: (min) => roleAtLeast(user?.role, min),
     }),
-    [status, user, login, logout],
+    [status, user, login, logout, retry],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

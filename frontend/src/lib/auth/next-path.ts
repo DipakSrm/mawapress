@@ -1,11 +1,21 @@
 export const LOGIN_PATH = "/admin/login";
 
-/** Only same-origin admin paths are valid redirect targets (blocks open redirects). */
+/** True when `path` is `base` itself, or `base` followed by a path, query or hash boundary. */
+function isUnder(path: string, base: string): boolean {
+  if (!path.startsWith(base)) return false;
+  const next = path.charAt(base.length);
+  return next === "" || next === "/" || next === "?" || next === "#";
+}
+
+/**
+ * Only same-origin admin paths are valid redirect targets (blocks open redirects, `/administrator`,
+ * protocol-relative and backslash tricks). The login page itself is never a target.
+ */
 export function safeNextPath(next: string | null | undefined): string {
-  if (!next || !next.startsWith("/admin") || next.startsWith("//") || next.includes("\\")) {
+  if (!next || !isUnder(next, "/admin") || next.startsWith("//") || next.includes("\\")) {
     return "/admin";
   }
-  if (next === LOGIN_PATH || next.startsWith(`${LOGIN_PATH}?`)) return "/admin";
+  if (isUnder(next, LOGIN_PATH)) return "/admin";
   return next;
 }
 

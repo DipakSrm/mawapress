@@ -2,7 +2,7 @@
 
 import { AlertCircle, Loader2 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,6 +30,8 @@ export function loginErrorMessage(e: unknown): string {
   return "Sign-in failed. Please try again.";
 }
 
+const ERROR_ID = "login-error";
+
 export function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
@@ -39,6 +41,8 @@ export function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const emailRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
 
   // Already signed in (restored from the refresh cookie, or just logged in): leave the login page.
   useEffect(() => {
@@ -48,6 +52,13 @@ export function LoginForm() {
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (pending) return;
+    // Validate here rather than disabling the button, so the reason is always announced.
+    const missing = !email.trim() ? "email" : !password ? "password" : null;
+    if (missing) {
+      setError(missing === "email" ? "Enter your email address." : "Enter your password.");
+      (missing === "email" ? emailRef : passwordRef).current?.focus();
+      return;
+    }
     setError(null);
     setPending(true);
     try {
@@ -75,6 +86,7 @@ export function LoginForm() {
           <form onSubmit={onSubmit} className="mt-5 space-y-4" noValidate>
             {error && (
               <div
+                id={ERROR_ID}
                 role="alert"
                 className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
               >
@@ -90,10 +102,12 @@ export function LoginForm() {
                 type="email"
                 autoComplete="username"
                 autoFocus
+                ref={emailRef}
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 aria-invalid={error ? true : undefined}
+                aria-describedby={error ? ERROR_ID : undefined}
               />
             </div>
             <div className="space-y-1.5">
@@ -103,13 +117,15 @@ export function LoginForm() {
                 name="password"
                 type="password"
                 autoComplete="current-password"
+                ref={passwordRef}
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 aria-invalid={error ? true : undefined}
+                aria-describedby={error ? ERROR_ID : undefined}
               />
             </div>
-            <Button type="submit" className="w-full" disabled={pending || !email || !password}>
+            <Button type="submit" className="w-full" disabled={pending}>
               {pending && <Loader2 aria-hidden className="animate-spin" />}
               {pending ? "Signing in" : "Sign in"}
             </Button>

@@ -247,6 +247,20 @@ describe("token refresh", () => {
     expect(expired).not.toHaveBeenCalled();
   });
 
+  it("a 5xx from refresh keeps the session and does not emit auth:expired", async () => {
+    setAccessToken("old");
+    server.use(
+      http.get("*/api/me", () => HttpResponse.json(envelope("INVALID_TOKEN"), { status: 401 })),
+      http.post("*/api/auth/refresh", () => new HttpResponse("bad gateway", { status: 502 })),
+    );
+    const expired = vi.fn();
+    window.addEventListener(AUTH_EXPIRED_EVENT, expired);
+    await expect(api.get("/api/me")).rejects.toMatchObject({ status: 502 });
+    window.removeEventListener(AUTH_EXPIRED_EVENT, expired);
+    expect(expired).not.toHaveBeenCalled();
+    expect(getAccessToken()).toBe("old");
+  });
+
   it("REFRESH_REUSED clears the session and emits auth:expired", async () => {
     setAccessToken("old");
     let refreshCalls = 0;

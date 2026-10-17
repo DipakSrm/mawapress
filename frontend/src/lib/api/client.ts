@@ -186,8 +186,8 @@ export function createApiClient({ baseUrl = "" }: ApiClientOptions = {}) {
       setAccessToken(token);
       return token;
     } catch (e) {
-      // A network failure says nothing about the session: keep the token and let a later request retry.
-      if (!(e instanceof ApiError && e.status === 0)) expireSession();
+      // A network failure or server error says nothing about the session: keep it and let a later request retry.
+      if (!(e instanceof ApiError && (e.status === 0 || e.status >= 500))) expireSession();
       throw e;
     }
   }

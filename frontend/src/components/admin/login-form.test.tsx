@@ -81,4 +81,30 @@ describe("login page", () => {
     await fillAndSubmit();
     expect(await screen.findByRole("alert")).toHaveTextContent("Try again in 30 seconds.");
   });
+
+  it("keeps the button enabled and validates on submit", async () => {
+    nav.pathname = "/admin/login";
+    mockSignedOut();
+    renderWithSession(<LoginForm />);
+    const button = screen.getByRole("button", { name: "Sign in" });
+    expect(button).toBeEnabled();
+    await userEvent.click(button);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Enter your email address.");
+    expect(screen.getByLabelText("Email")).toHaveFocus();
+    await userEvent.type(screen.getByLabelText("Email"), "ed@mawapress.test");
+    await userEvent.click(button);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Enter your password.");
+    expect(screen.getByLabelText("Password")).toHaveFocus();
+  });
+
+  it("points the inputs at the error with aria-describedby", async () => {
+    server.use(http.post("*/api/auth/login", () => failure(401, "INVALID_CREDENTIALS")));
+    await fillAndSubmit();
+    const alert = await screen.findByRole("alert");
+    for (const label of ["Email", "Password"]) {
+      const input = screen.getByLabelText(label);
+      expect(input).toHaveAttribute("aria-invalid", "true");
+      expect(input.getAttribute("aria-describedby")).toBe(alert.id);
+    }
+  });
 });

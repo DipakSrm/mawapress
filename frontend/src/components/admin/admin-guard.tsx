@@ -1,6 +1,8 @@
 "use client";
 
+import { CloudOff } from "lucide-react";
 import type { ReactNode } from "react";
+import { Button } from "@/components/ui/button";
 import { useSession } from "@/lib/auth";
 import { AdminShell } from "./admin-shell";
 
@@ -30,9 +32,27 @@ function ShellSkeleton() {
   );
 }
 
+function SessionError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-muted/30 px-4">
+      <div role="alert" className="max-w-sm rounded-xl border bg-card p-6 text-center shadow-sm">
+        <CloudOff aria-hidden className="mx-auto size-8 text-muted-foreground" />
+        <h1 className="mt-3 text-lg font-semibold">Could not check your session</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          The server is not responding. Your sign-in is not affected; try again in a moment.
+        </p>
+        <Button className="mt-4" onClick={onRetry}>
+          Retry
+        </Button>
+      </div>
+    </main>
+  );
+}
+
 /** Client-side gate: the API enforces authorization; this keeps signed-out users off the screens. */
 export function AdminGuard({ children }: { children: ReactNode }) {
-  const { status } = useSession();
+  const { status, retry } = useSession();
+  if (status === "error") return <SessionError onRetry={retry} />;
   // Signed-out users see the skeleton while the provider redirects them to login.
   if (status !== "authenticated") return <ShellSkeleton />;
   return <AdminShell>{children}</AdminShell>;
