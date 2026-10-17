@@ -60,7 +60,7 @@ export function PostsPage() {
   const filters = useMemo(() => parseFilters(searchParams), [searchParams]);
   const list = usePostList(filters);
   const categories = useCategories();
-  const { run, pendingId } = usePostActions();
+  const { run, pendingIds } = usePostActions();
   const [authorNames, setAuthorNames] = useState<Record<string, string>>({});
 
   const update = useCallback(
@@ -147,7 +147,7 @@ export function PostsPage() {
               posts={list.data.items}
               categories={categories.data}
               viewer={viewer}
-              pendingId={pendingId}
+              pendingIds={pendingIds}
               onRun={run}
               onFilterAuthor={filterByAuthor}
             />

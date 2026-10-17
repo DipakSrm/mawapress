@@ -9,6 +9,15 @@ export type Tag = components["schemas"]["TagOut"];
 
 export const MAX_DEPTH = 3;
 
+/** The one categories query every screen shares (same key, same staleTime). */
+export function useCategories() {
+  return useQuery({
+    queryKey: ["categories"],
+    queryFn: () => api.get<Category[]>("/api/categories"),
+    staleTime: 5 * 60_000,
+  });
+}
+
 export interface CategoryNode {
   category: Category;
   depth: number;

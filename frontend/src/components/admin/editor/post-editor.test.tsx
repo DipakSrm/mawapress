@@ -83,6 +83,11 @@ function makePost(over: Partial<PostOut> = {}): PostOut {
     scheduled_at: null,
     schedule_attempts: 0,
     schedule_last_error: null,
+    feedback_note: null,
+    feedback_by: null,
+    feedback_by_name: null,
+    feedback_at: null,
+    created_at: T0,
     updated_at: T0,
     translations: [translation("ne")],
     tags: [],
@@ -272,7 +277,7 @@ describe("conflicts", () => {
       expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Their headline"),
     );
     expect(screen.queryByText("Someone else edited this post")).toBeNull();
-    expect(JSON.parse(window.localStorage.getItem("mawapress:kept:p1:ne")!).fields.title).toBe(
+    expect(JSON.parse(window.localStorage.getItem("mawapress:kept:u-ed:p1:ne")!).fields.title).toBe(
       "मोरङमा बाढी!",
     );
 
@@ -281,10 +286,21 @@ describe("conflicts", () => {
   });
 });
 
+const SHARED = { categoryId: 1, tags: [], featuredMedia: null, isBreaking: false };
+const storedFields = (over: Record<string, string>) => ({
+  title: "मोरङमा बाढी",
+  content: doc("बाढीले क्षति पुर्‍यायो"),
+  excerpt: "",
+  seoTitle: "",
+  seoDescription: "",
+  slug: "morang-baadhi",
+  ...over,
+});
+
 describe("local copy", () => {
   it("offers to restore a newer unsaved copy and applies it", async () => {
     window.localStorage.setItem(
-      "mawapress:draft:p1:ne",
+      "mawapress:draft:u-ed:p1:ne",
       JSON.stringify({
         savedAt: Date.now() + 1000,
         locale: "ne",
@@ -306,21 +322,96 @@ describe("local copy", () => {
     expect(await screen.findByText("Unsaved changes")).toBeInTheDocument();
   });
 
-  it("does not offer a copy that is older than the server version", async () => {
+  it("offers a copy older than the server version, labelled, and restores it as a merge", async () => {
+    // The copy was made against the original post (title "मोरङमा बाढी", no excerpt) and only the title
+    // was edited. The server has since changed the title and added an excerpt.
     window.localStorage.setItem(
-      "mawapress:draft:p1:ne",
+      "mawapress:draft:u-ed:p1:ne",
       JSON.stringify({
         savedAt: Date.parse(T0) - 1000,
         locale: "ne",
-        fields: {
-          title: "Stale",
-          content: doc("x"),
-          excerpt: "",
-          seoTitle: "",
-          seoDescription: "",
-          slug: "",
-        },
-        shared: { categoryId: 1, tags: [], featuredMedia: null, isBreaking: false },
+        fields: { ...storedFields({ title: "Local title" }) },
+        shared: SHARED,
+        base: storedFields({}),
+        baseShared: SHARED,
+      }),
+    );
+    const server = makePost({
+      updated_at: T1,
+      translations: [translation("ne", { title: "Server title", excerpt: "Server excerpt" })],
+    });
+    const { user } = mount(server);
+    expect(
+      await screen.findByText(/Saved on this device before the latest server version/),
+    ).toBeInTheDocument();
+    // The offer holds the copy in the kept slot; nothing deleted it.
+    expect(JSON.parse(window.localStorage.getItem("mawapress:kept:u-ed:p1:ne")!).fields.title).toBe(
+      "Local title",
+    );
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Server title");
+
+    await user.click(screen.getByRole("button", { name: "Restore unsaved changes" }));
+    // Edited field: the user's value. Untouched field: the server's value.
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Local title");
+    expect(screen.getByLabelText("Excerpt")).toHaveValue("Server excerpt");
+  });
+
+  it("merges a kept copy with a newer live copy instead of dropping the older one", async () => {
+    const base = storedFields({});
+    window.localStorage.setItem(
+      "mawapress:kept:u-ed:p1:ne",
+      JSON.stringify({
+        savedAt: Date.now() + 1000,
+        locale: "ne",
+        fields: storedFields({ title: "Kept title", excerpt: "Kept excerpt" }),
+        shared: SHARED,
+        base,
+        baseShared: SHARED,
+      }),
+    );
+    window.localStorage.setItem(
+      "mawapress:draft:u-ed:p1:ne",
+      JSON.stringify({
+        savedAt: Date.now() + 5000,
+        locale: "ne",
+        fields: storedFields({ title: "Live title" }),
+        shared: SHARED,
+        base,
+        baseShared: SHARED,
+      }),
+    );
+    const { user } = mount(makePost());
+    await user.click(await screen.findByRole("button", { name: "Restore unsaved changes" }));
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Live title"); // newer wins
+    expect(screen.getByLabelText("Excerpt")).toHaveValue("Kept excerpt"); // older one's edit survives
+  });
+
+  it("never shows another user's local copies", async () => {
+    const copy = JSON.stringify({
+      savedAt: Date.now() + 1000,
+      locale: "ne",
+      fields: storedFields({ title: "Reporter's secret draft" }),
+      shared: SHARED,
+    });
+    window.localStorage.setItem("mawapress:draft:u-rep:p1:ne", copy);
+    const { user } = mount(makePost()); // signed in as the editor
+    await title();
+    expect(screen.queryByRole("button", { name: "Restore unsaved changes" })).toBeNull();
+    await user.type(screen.getByRole("textbox", { name: "Title" }), "!");
+    await advance(1000);
+    // The editor's own copy is under the editor's key; the reporter's is untouched.
+    expect(window.localStorage.getItem("mawapress:draft:u-ed:p1:ne")).not.toBeNull();
+    expect(window.localStorage.getItem("mawapress:draft:u-rep:p1:ne")).toBe(copy);
+  });
+
+  it("ignores copies stored under the old unscoped key", async () => {
+    window.localStorage.setItem(
+      "mawapress:draft:p1:ne",
+      JSON.stringify({
+        savedAt: Date.now() + 1000,
+        locale: "ne",
+        fields: storedFields({ title: "Unscoped" }),
+        shared: SHARED,
       }),
     );
     mount(makePost());
@@ -328,13 +419,41 @@ describe("local copy", () => {
     expect(screen.queryByRole("button", { name: "Restore unsaved changes" })).toBeNull();
   });
 
+  it("writes the local copy right away when the screen unmounts inside the debounce window", async () => {
+    const { user, unmount } = mount(makePost());
+    await user.type(await title(), "?");
+    expect(window.localStorage.getItem("mawapress:draft:u-ed:p1:ne")).toBeNull(); // still debounced
+    unmount();
+    expect(
+      JSON.parse(window.localStorage.getItem("mawapress:draft:u-ed:p1:ne")!).fields.title,
+    ).toBe("मोरङमा बाढी?");
+  });
+
+  it("hides Restore (keeping the copy) when the post is read only for the user", async () => {
+    window.localStorage.setItem(
+      "mawapress:draft:u-rep:p1:ne",
+      JSON.stringify({
+        savedAt: Date.now() + 1000,
+        locale: "ne",
+        fields: storedFields({ title: "Mine" }),
+        shared: SHARED,
+      }),
+    );
+    mount(makePost({ author_id: "someone-else" }), reporter);
+    expect(await screen.findByText("Unsaved changes found")).toBeInTheDocument();
+    expect(screen.getByText("Read only")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore unsaved changes" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Discard" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("mawapress:kept:u-rep:p1:ne")).not.toBeNull();
+  });
+
   it("keeps the draft in localStorage while changes are unsaved", async () => {
     const { user } = mount(makePost());
     await user.type(await title(), "?");
     await advance(1000);
-    expect(JSON.parse(window.localStorage.getItem("mawapress:draft:p1:ne")!).fields.title).toBe(
-      "मोरङमा बाढी?",
-    );
+    expect(
+      JSON.parse(window.localStorage.getItem("mawapress:draft:u-ed:p1:ne")!).fields.title,
+    ).toBe("मोरङमा बाढी?");
   });
 });
 
@@ -421,6 +540,18 @@ describe("SEO panel", () => {
     );
     expect(await screen.findByTestId("serp-title")).toHaveTextContent("From the API | MAWAPRESS");
     expect(screen.getByTestId("serp-description")).toHaveTextContent("API description");
+  });
+
+  it("builds the preview URL from NEXT_PUBLIC_SITE_URL when it is set", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://mawapress.example/");
+    try {
+      const { user } = mount(null);
+      await user.type(await title(), "Headline");
+      expect((await screen.findAllByText(/mawapress\.example/)).length).toBeGreaterThan(0);
+      expect(screen.queryByText(/localhost/)).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("disables the slug for a draft and says why", async () => {
@@ -547,5 +678,53 @@ describe("workflow", () => {
     mount(makePost({ author_id: "someone-else" }), reporter);
     expect(await screen.findByText("Read only")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Title" })).toHaveAttribute("readonly");
+  });
+});
+
+describe("send-back feedback and unpublish", () => {
+  it("shows the editor's feedback on a draft that was sent back", async () => {
+    mount(
+      makePost({
+        feedback_note: "Add a second source",
+        feedback_by_name: "Ed Editor",
+        feedback_at: T1,
+      } as Partial<PostOut>),
+    );
+    expect(await screen.findByText("Feedback from Ed Editor")).toBeInTheDocument();
+    expect(screen.getByText("Add a second source")).toBeInTheDocument();
+  });
+
+  it("shows no feedback callout once the post is not a draft", async () => {
+    mount(
+      makePost({
+        status: "in_review",
+        feedback_note: "Add a second source",
+        feedback_by_name: "Ed Editor",
+      } as Partial<PostOut>),
+    );
+    await title();
+    expect(screen.queryByText(/Feedback from/)).toBeNull();
+  });
+
+  it("asks before unpublishing, and does nothing on Cancel", async () => {
+    const calls = captureWrites(() => patchOk(makePost({ status: "archived", updated_at: T1 })));
+    const { user } = mount(
+      makePost({
+        status: "published",
+        translations: [translation("ne", { status: "published" })],
+      } as Partial<PostOut>),
+    );
+    await user.click(await screen.findByRole("button", { name: "Unpublish" }));
+    const dialog = await screen.findByRole("dialog", { name: "Unpublish this post?" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(calls).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "Unpublish" }));
+    await user.click(
+      within(await screen.findByRole("dialog")).getByRole("button", { name: "Unpublish" }),
+    );
+    await waitFor(() => expect(calls[0]?.url).toBe("/api/posts/p1/unpublish"));
+    expect(calls[0].ifMatch).toBe(T0);
   });
 });

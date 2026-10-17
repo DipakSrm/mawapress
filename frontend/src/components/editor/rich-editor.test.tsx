@@ -280,6 +280,8 @@ describe("RichEditor", () => {
     const swatch = await screen.findByRole("button", { name: "Black #000000" });
     swatch.focus();
     await user.keyboard("{ArrowRight}");
+    // The arrow did not leak to the toolbar's roving focus: focus stays on the swatch.
+    expect(swatch).toHaveFocus();
     expect(screen.getByRole("button", { name: "Undo" })).not.toHaveFocus();
     expect(screen.getByRole("button", { name: "Redo" })).not.toHaveFocus();
     const focusSpy = vi.spyOn(editor.commands, "focus");

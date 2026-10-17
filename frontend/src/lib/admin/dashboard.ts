@@ -2,9 +2,9 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { api, type components } from "@/lib/api";
+import type { PostList } from "./posts";
 
-export type PostSummary = components["schemas"]["PostSummary"];
-export type PostList = components["schemas"]["PostListOut"];
+export type { PostSummary, PostList } from "./posts";
 type PostStatus = components["schemas"]["PostStatus"];
 
 interface PostsQuery {

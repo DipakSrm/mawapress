@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { FolderTree, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
@@ -22,16 +22,10 @@ import {
   categoryError,
   flattenTree,
   subtreeIds,
+  useCategories,
   type Category,
 } from "@/lib/admin/taxonomy";
 import { api } from "@/lib/api";
-
-function useCategoryList() {
-  return useQuery({
-    queryKey: ["categories"],
-    queryFn: () => api.get<Category[]>("/api/categories"),
-  });
-}
 
 interface FormProps {
   /** The category being edited, or null to create one. */
@@ -246,7 +240,7 @@ function DeleteDialog({ category, onClose }: { category: Category; onClose: () =
 
 export function CategoriesPage() {
   const queryClient = useQueryClient();
-  const list = useCategoryList();
+  const list = useCategories();
   const [editing, setEditing] = useState<Category | "new" | null>(null);
   const [deleting, setDeleting] = useState<Category | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);

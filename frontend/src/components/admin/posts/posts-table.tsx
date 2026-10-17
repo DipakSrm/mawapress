@@ -1,5 +1,6 @@
 "use client";
 
+import { MessageSquareWarning } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,7 +46,29 @@ function LanguageChip({ locale, status }: { locale: string; status: "draft" | "p
   );
 }
 
-export function TitleCell({ post }: { post: PostSummary }) {
+/** An editor sent this post back with a note; shown until the reporter resubmits. */
+export function FeedbackFlag({ post }: { post: PostSummary }) {
+  if (post.status !== "draft" || !post.feedback_note) return null;
+  const who = post.feedback_by_name ?? "an editor";
+  return (
+    <span
+      title={`Feedback from ${who}: ${post.feedback_note}`}
+      className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 dark:text-amber-400"
+    >
+      <MessageSquareWarning aria-hidden className="size-3.5" />
+      Feedback from {who}
+    </span>
+  );
+}
+
+export function TitleCell({
+  post,
+  onFilterAuthor,
+}: {
+  post: PostSummary;
+  /** Editors only: filter the list to this author (the Author column is hidden below lg). */
+  onFilterAuthor?: (post: PostSummary) => void;
+}) {
   const translations = orderedTranslations(post);
   return (
     <ul className="space-y-1">
@@ -67,6 +90,26 @@ export function TitleCell({ post }: { post: PostSummary }) {
           )}
         </li>
       ))}
+      <li className="space-y-0.5">
+        <FeedbackFlag post={post} />
+      </li>
+      <li className="text-xs text-muted-foreground lg:hidden" data-testid="mobile-author">
+        by{" "}
+        {onFilterAuthor ? (
+          <Button
+            type="button"
+            variant="link"
+            size="xs"
+            className="h-auto p-0 text-xs text-foreground"
+            onClick={() => onFilterAuthor(post)}
+            aria-label={`Show posts by ${post.author_name} (small screens)`}
+          >
+            {post.author_name}
+          </Button>
+        ) : (
+          post.author_name
+        )}
+      </li>
     </ul>
   );
 }
@@ -93,12 +136,19 @@ interface Props {
   posts: PostSummary[];
   categories: Category[] | undefined;
   viewer: { id: string; isEditor: boolean };
-  pendingId: string | null;
+  pendingIds: ReadonlySet<string>;
   onRun: (post: PostSummary, action: PostAction) => Promise<ActionResult>;
   onFilterAuthor: (post: PostSummary) => void;
 }
 
-export function PostsTable({ posts, categories, viewer, pendingId, onRun, onFilterAuthor }: Props) {
+export function PostsTable({
+  posts,
+  categories,
+  viewer,
+  pendingIds,
+  onRun,
+  onFilterAuthor,
+}: Props) {
   return (
     <Table>
       <caption className="sr-only">Posts</caption>
@@ -121,7 +171,10 @@ export function PostsTable({ posts, categories, viewer, pendingId, onRun, onFilt
           return (
             <TableRow key={post.id}>
               <TableCell className="max-w-0 min-w-56 pl-4 sm:max-w-md">
-                <TitleCell post={post} />
+                <TitleCell
+                  post={post}
+                  onFilterAuthor={viewer.isEditor ? onFilterAuthor : undefined}
+                />
               </TableCell>
               <TableCell className="hidden text-sm md:table-cell">
                 {category ? (
@@ -163,7 +216,7 @@ export function PostsTable({ posts, categories, viewer, pendingId, onRun, onFilt
                   title={primaryTitle(post)}
                   viewer={viewer}
                   categories={categories}
-                  busy={pendingId === post.id}
+                  busy={pendingIds.has(post.id)}
                   onRun={onRun}
                 />
               </TableCell>

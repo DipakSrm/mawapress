@@ -183,7 +183,7 @@ export function PostFiltersBar({
 
 function Field({ label, id, children }: { label: string; id: string; children: React.ReactNode }) {
   return (
-    <div className="w-40 space-y-1.5">
+    <div className="w-[calc(50%-0.375rem)] space-y-1.5 sm:w-40">
       <label htmlFor={id} className="text-xs font-medium text-muted-foreground">
         {label}
       </label>

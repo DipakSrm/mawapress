@@ -40,8 +40,8 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Organise",
     items: [
-      { href: "/admin/categories", label: "Categories", icon: FolderTree },
-      { href: "/admin/tags", label: "Tags", icon: Tags },
+      { href: "/admin/categories", label: "Categories", icon: FolderTree, minRole: "editor" },
+      { href: "/admin/tags", label: "Tags", icon: Tags, minRole: "editor" },
     ],
   },
   {

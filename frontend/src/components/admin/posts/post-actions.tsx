@@ -32,6 +32,12 @@ import {
   type PostAction,
   type PostSummary,
 } from "@/lib/admin/posts";
+import { siteUrl } from "@/lib/admin/site-url";
+import {
+  PublishConfirmDialog,
+  type PublishTarget,
+} from "@/components/admin/editor/publish-confirm-dialog";
+import { ConfirmActionDialog } from "./confirm-action-dialog";
 import { SendBackDialog } from "./send-back-dialog";
 import { ScheduleDialog } from "./schedule-dialog";
 
@@ -45,7 +51,7 @@ interface Props {
 }
 
 async function copyPublicLink(path: string) {
-  const url = new URL(path, window.location.origin).toString();
+  const url = siteUrl(path);
   try {
     await navigator.clipboard.writeText(url);
     toast.success("Link copied");
@@ -55,10 +61,18 @@ async function copyPublicLink(path: string) {
 }
 
 export function PostActions({ post, title, viewer, categories, busy, onRun }: Props) {
-  const [dialog, setDialog] = useState<"schedule" | "send-back" | null>(null);
+  const [dialog, setDialog] = useState<"schedule" | "send-back" | "publish" | "unpublish" | null>(
+    null,
+  );
   const can = allowedActions(post, viewer);
   const link = can.copyLink ? publicPath(post, categories) : null;
   const run = (action: PostAction) => void onRun(post, action);
+  // The backend publishes every existing translation, so the confirmation lists them all.
+  const targets: PublishTarget[] = post.translations.flatMap((t) =>
+    t.locale === "ne" || t.locale === "en"
+      ? [{ locale: t.locale, title: t.title, live: t.status === "published" }]
+      : [],
+  );
 
   return (
     <>
@@ -92,7 +106,7 @@ export function PostActions({ post, title, viewer, categories, busy, onRun }: Pr
             </DropdownMenuItem>
           )}
           {can.publish && (
-            <DropdownMenuItem onClick={() => run({ type: "publish" })}>
+            <DropdownMenuItem onClick={() => setDialog("publish")}>
               <CircleCheck aria-hidden /> Publish now
             </DropdownMenuItem>
           )}
@@ -108,7 +122,7 @@ export function PostActions({ post, title, viewer, categories, busy, onRun }: Pr
             </DropdownMenuItem>
           )}
           {can.unpublish && (
-            <DropdownMenuItem onClick={() => run({ type: "unpublish" })}>
+            <DropdownMenuItem onClick={() => setDialog("unpublish")}>
               <Globe aria-hidden /> Unpublish
             </DropdownMenuItem>
           )}
@@ -129,6 +143,23 @@ export function PostActions({ post, title, viewer, categories, busy, onRun }: Pr
         <SendBackDialog
           onClose={() => setDialog(null)}
           onSendBack={(note) => onRun(post, { type: "send-back", note: note || undefined })}
+        />
+      )}
+      {dialog === "publish" && (
+        <PublishConfirmDialog
+          targets={targets}
+          onClose={() => setDialog(null)}
+          onConfirm={() => onRun(post, { type: "publish" })}
+        />
+      )}
+      {dialog === "unpublish" && (
+        <ConfirmActionDialog
+          title="Unpublish this post?"
+          description="Every language leaves the public site now and the post moves to the archive. Unarchive brings it back."
+          confirmLabel="Unpublish"
+          destructive
+          onClose={() => setDialog(null)}
+          onConfirm={() => onRun(post, { type: "unpublish" })}
         />
       )}
       {dialog === "schedule" && (

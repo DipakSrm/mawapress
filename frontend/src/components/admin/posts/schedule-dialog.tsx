@@ -44,10 +44,11 @@ export function ScheduleDialog({ post, onClose, onSchedule }: Props) {
     setError(null);
     setPending(true);
     const result = await onSchedule(iso);
-    if (result.ok || result.error.status !== 422) {
-      onClose(); // done, or the post changed under us: the list explains it
+    if (result.ok) {
+      onClose();
       return;
     }
+    // Any failure (validation, a conflict, a dropped connection) keeps the dialog and the chosen time.
     setError(result.error.message);
     setPending(false);
   }

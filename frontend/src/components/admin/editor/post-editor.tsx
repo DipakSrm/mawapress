@@ -25,6 +25,7 @@ import { LOCALES } from "@/lib/admin/editor/draft";
 import { checkReadability } from "@/lib/admin/editor/readability";
 import { buildSeoPreview, EXCERPT_MAX, fromSeoAuto, type Locale } from "@/lib/admin/editor/seo";
 import { usePostEditor } from "@/lib/admin/editor/use-post-editor";
+import { siteOrigin, siteUrl } from "@/lib/admin/site-url";
 import { formatDateTime } from "@/lib/admin/post-display";
 import {
   allowedActions,
@@ -98,11 +99,6 @@ function Banner({
   );
 }
 
-function absolute(url: string | null | undefined, origin: string): string | null {
-  if (!url) return null;
-  return url.startsWith("/") ? `${origin}${url}` : url;
-}
-
 export interface PostEditorProps {
   /** The post to edit, or null for a new one (created on the first save). */
   initial: PostOut | null;
@@ -146,7 +142,7 @@ export function PostEditor({ initial }: PostEditorProps) {
   const canEdit = !post || isEditor || (post.author_id === viewer.id && post.status === "draft");
   const serverTr = post?.translations.find((t) => t.locale === locale);
 
-  useEffect(() => setOrigin(window.location.origin), []);
+  useEffect(() => setOrigin(siteOrigin()), []);
 
   // Keep the posts list fresh after each save.
   const savedAt = ed.status.kind === "saved" ? ed.status.at : null;
@@ -206,6 +202,7 @@ export function PostEditor({ initial }: PostEditorProps) {
     const auto = saved ? fromSeoAuto(serverTr?.seo_auto) : null;
     if (auto) return { preview: auto, fromServer: true };
     const media = draft.shared.featuredMedia;
+    const ogImage = media?.variants.og ?? media?.url;
     return {
       fromServer: false,
       preview: buildSeoPreview({
@@ -217,7 +214,7 @@ export function PostEditor({ initial }: PostEditorProps) {
         slug: local?.slug,
         categorySlug: category?.slug,
         origin,
-        imageUrl: absolute(media?.variants.og ?? media?.url, origin),
+        imageUrl: ogImage ? siteUrl(ogImage, origin) : null,
       }),
     };
   }, [
@@ -319,7 +316,7 @@ export function PostEditor({ initial }: PostEditorProps) {
         targets={targets}
         categories={categories.data}
         status={ed.status}
-        busy={actions.pendingId !== null || actingNow}
+        busy={actions.pendingIds.size > 0 || actingNow}
         onPrepare={prepareToPublish}
         canEdit={canEdit}
         onSave={() => void ed.flush()}
@@ -335,6 +332,16 @@ export function PostEditor({ initial }: PostEditorProps) {
         }
       />
 
+      {post?.status === "draft" && post.feedback_note && (
+        <Banner tone="info" title={`Feedback from ${post.feedback_by_name ?? "an editor"}`}>
+          <span className="whitespace-pre-wrap text-foreground">{post.feedback_note}</span>
+          {post.feedback_at && (
+            <span className="mt-1 block text-xs text-muted-foreground">
+              Sent back {formatDateTime(post.feedback_at)}
+            </span>
+          )}
+        </Banner>
+      )}
       {ed.conflict && (
         <Banner
           title="Someone else edited this post"
@@ -365,20 +372,29 @@ export function PostEditor({ initial }: PostEditorProps) {
           title="Unsaved changes found"
           actions={
             <>
-              <Button size="sm" onClick={ed.restoreLocal}>
-                Restore unsaved changes
-              </Button>
+              {canEdit && (
+                <Button size="sm" onClick={ed.restoreLocal}>
+                  Restore unsaved changes
+                </Button>
+              )}
               <Button size="sm" variant="ghost" onClick={() => setDiscardOpen(true)}>
                 Discard
               </Button>
             </>
           }
         >
-          This browser has edits from{" "}
+          {ed.restoreOffer.stale
+            ? "Saved on this device before the latest server version"
+            : "This browser has edits"}{" "}
+          from{" "}
           {formatDateTime(
             new Date(Math.max(...ed.restoreOffer.records.map((r) => r.savedAt))).toISOString(),
           )}{" "}
           that never reached the server.
+          {ed.restoreOffer.stale && canEdit
+            ? " Restoring keeps your edited fields and the server's values for everything else."
+            : ""}
+          {!canEdit ? " You cannot edit this post, so the copy is kept for now." : ""}
         </Banner>
       )}
       {!canEdit && (

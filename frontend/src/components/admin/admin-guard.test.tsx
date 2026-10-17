@@ -59,24 +59,29 @@ describe("admin guard", () => {
     expect(router.replace).not.toHaveBeenCalled();
   });
 
-  it("hides admin-only nav items from reporters", async () => {
+  it("hides editor and admin nav items from reporters", async () => {
     mockSignedIn(reporter);
     renderWithSession(page);
     await screen.findByText("secret page");
     const sidebar = screen.getAllByRole("navigation", { name: "Admin" })[0];
-    for (const label of [
-      "Dashboard",
-      "Posts",
-      "New post",
-      "Media",
-      "Categories",
-      "Tags",
-      "Profile",
-    ]) {
+    for (const label of ["Dashboard", "Posts", "New post", "Media", "Profile"]) {
       expect(within(sidebar).getByRole("link", { name: label })).toBeInTheDocument();
+    }
+    for (const label of ["Categories", "Tags"]) {
+      expect(within(sidebar).queryByRole("link", { name: label })).not.toBeInTheDocument();
     }
     expect(within(sidebar).queryByRole("link", { name: "Users" })).not.toBeInTheDocument();
     expect(within(sidebar).queryByRole("link", { name: "Jobs" })).not.toBeInTheDocument();
+  });
+
+  it("shows Categories and Tags to editors", async () => {
+    mockSignedIn(editor);
+    renderWithSession(page);
+    await screen.findByText("secret page");
+    const sidebar = screen.getAllByRole("navigation", { name: "Admin" })[0];
+    expect(within(sidebar).getByRole("link", { name: "Categories" })).toBeInTheDocument();
+    expect(within(sidebar).getByRole("link", { name: "Tags" })).toBeInTheDocument();
+    expect(within(sidebar).queryByRole("link", { name: "Users" })).not.toBeInTheDocument();
   });
 
   it("shows admin-only nav items to admins", async () => {

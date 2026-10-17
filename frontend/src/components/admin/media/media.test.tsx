@@ -116,6 +116,39 @@ describe("media detail", () => {
     await waitFor(() => expect(screen.queryByLabelText("Caption")).toBeNull());
   });
 
+  it("after a failed save keeps the sheet open with the error, and Close without saving leaves", async () => {
+    const user = mount();
+    server.use(
+      http.patch("*/api/media/:id", () =>
+        HttpResponse.json(
+          { error: { code: "INTERNAL_ERROR", message: "Disk full", details: {} } },
+          { status: 500 },
+        ),
+      ),
+    );
+    await user.click(await screen.findByRole("button", { name: /^A river/ }));
+    await user.type(await screen.findByLabelText("Caption"), "Koshi in flood");
+    await user.keyboard("{Escape}");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Disk full");
+    // Still open, edit intact.
+    expect(screen.getByLabelText("Caption")).toHaveValue("Koshi in flood");
+    await user.click(screen.getByRole("button", { name: "Close without saving" }));
+    await waitFor(() => expect(screen.queryByLabelText("Caption")).toBeNull());
+  });
+
+  it("copies an absolute URL built from NEXT_PUBLIC_SITE_URL for a relative address", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://mawapress.example/");
+    const user = mount();
+    // After mount: user-event installs its own clipboard when it is set up.
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    await user.click(await screen.findByRole("button", { name: /^A river/ }));
+    await user.click(await screen.findByRole("button", { name: "Copy" }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("https://mawapress.example/media/a.jpg"),
+    );
+    vi.unstubAllEnvs();
+  });
+
   it("shows why an image in use cannot be deleted", async () => {
     const user = mount();
     server.use(

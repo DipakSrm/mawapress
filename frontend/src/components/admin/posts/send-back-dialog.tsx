@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2 } from "lucide-react";
+import { AlertCircle, Loader2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,13 +23,21 @@ interface Props {
 export function SendBackDialog({ onClose, onSendBack }: Props) {
   const [note, setNote] = useState("");
   const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (pending) return;
     setPending(true);
-    await onSendBack(note.trim());
-    onClose(); // failures are reported by a toast
+    setError(null);
+    const result = await onSendBack(note.trim());
+    if (result.ok) {
+      onClose();
+      return;
+    }
+    // Stay open with the note intact, so a dropped connection costs the editor nothing.
+    setError(result.error.message);
+    setPending(false);
   }
 
   return (
@@ -51,7 +59,18 @@ export function SendBackDialog({ onClose, onSendBack }: Props) {
               maxLength={1000}
               rows={4}
               placeholder="What should change?"
+              aria-describedby={error ? "send-back-error" : undefined}
             />
+            {error && (
+              <p
+                id="send-back-error"
+                role="alert"
+                className="flex items-start gap-1.5 text-sm text-destructive"
+              >
+                <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0" />
+                <span>{error}</span>
+              </p>
+            )}
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={pending}>

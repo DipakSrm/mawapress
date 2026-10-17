@@ -18,14 +18,11 @@ import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import type { MediaOut } from "@/lib/admin/media";
+import { siteUrl } from "@/lib/admin/site-url";
 import { api, isApiError } from "@/lib/api";
 
 type Field = "alt_ne" | "alt_en" | "caption";
 const FIELDS: Field[] = ["alt_ne", "alt_en", "caption"];
-
-function absoluteUrl(url: string): string {
-  return url.startsWith("/") ? `${window.location.origin}${url}` : url;
-}
 
 interface Props {
   media: MediaOut;
@@ -94,7 +91,7 @@ export function MediaDetail({ media, canDelete, onChange, onDeleted, onClose }: 
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(absoluteUrl(media.url));
+      await navigator.clipboard.writeText(siteUrl(media.url));
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -166,9 +163,15 @@ export function MediaDetail({ media, canDelete, onChange, onDeleted, onClose }: 
               {saving ? "Saving…" : ""}
             </p>
             {error && (
-              <p role="alert" className="text-sm text-destructive">
-                {error}
-              </p>
+              <div className="space-y-2">
+                <p role="alert" className="text-sm text-destructive">
+                  {error}
+                </p>
+                {/* Closing normally retries the save; when it keeps failing this is the way out. */}
+                <Button type="button" variant="outline" size="sm" onClick={onClose}>
+                  Close without saving
+                </Button>
+              </div>
             )}
             <div className="space-y-1.5">
               <Label htmlFor="media-url">Address</Label>

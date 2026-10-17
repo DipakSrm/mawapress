@@ -40,6 +40,8 @@ function post(
     category_id: number;
     scheduled_at: string | null;
     updated_at: string;
+    feedback_note: string | null;
+    feedback_by_name: string | null;
     translations: { locale: string; slug: string; status: string; title: string }[];
   }> = {},
 ) {
@@ -51,8 +53,12 @@ function post(
     category_id: 1,
     published_at: status === "published" ? hoursAgo(5) : null,
     scheduled_at: null as string | null,
+    created_at: hoursAgo(3),
     updated_at: hoursAgo(2),
     view_count: 1234,
+    feedback_note: null as string | null,
+    feedback_by_name: null as string | null,
+    feedback_at: null as string | null,
     translations: [
       {
         locale: "ne",
@@ -116,6 +122,10 @@ async function openMenu(title: string) {
   return screen.findByRole("menu");
 }
 
+async function confirmDialog(name: string) {
+  await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name }));
+}
+
 const lastUrl = () => router.replace.mock.calls.at(-1)?.[0];
 
 beforeEach(() => {
@@ -145,7 +155,7 @@ describe("posts list", () => {
     expect(within(row).getByLabelText("Nepali, published")).toBeInTheDocument();
     expect(within(row).getByLabelText("English, draft")).toBeInTheDocument();
     expect(within(row).getByText("Flood in Morang")).toBeInTheDocument();
-    expect(within(row).getByText("Rita Reporter")).toBeInTheDocument();
+    expect(within(row).getAllByText("Rita Reporter").length).toBeGreaterThan(0);
     expect(within(row).getByText("Published")).toBeInTheDocument();
     expect(within(row).getByText("2 hours ago")).toBeInTheDocument();
     expect(within(row).getByText("1,234")).toBeInTheDocument();
@@ -300,6 +310,8 @@ describe("row actions", () => {
     item: string;
     path: string;
     message: string;
+    /** Button in the confirmation dialog, for actions that ask first. */
+    confirm?: string;
   }[] = [
     {
       name: "submit",
@@ -314,6 +326,7 @@ describe("row actions", () => {
       item: "Publish now",
       path: "publish",
       message: "Published",
+      confirm: "Publish",
     },
     {
       name: "unschedule",
@@ -328,6 +341,7 @@ describe("row actions", () => {
       item: "Unpublish",
       path: "unpublish",
       message: "Unpublished",
+      confirm: "Unpublish",
     },
     {
       name: "unarchive",
@@ -346,6 +360,11 @@ describe("row actions", () => {
     await openMenu("Title p1");
     const listsBefore = seen.lists.length;
     await userEvent.click(screen.getByRole("menuitem", { name: c.item }));
+    if (c.confirm) {
+      await userEvent.click(
+        within(await screen.findByRole("dialog")).getByRole("button", { name: c.confirm }),
+      );
+    }
     await waitFor(() => expect(seen.calls).toHaveLength(1));
     expect(seen.calls[0]).toMatchObject({ method: "POST", ifMatch: original });
     expect(seen.calls[0].url.pathname).toBe(`/api/posts/p1/${c.path}`);
@@ -358,6 +377,7 @@ describe("row actions", () => {
     renderPage();
     await openMenu("Title s");
     await userEvent.click(screen.getByRole("menuitem", { name: "Publish now" }));
+    await confirmDialog("Publish");
     await waitFor(() => expect(seen.calls.at(-1)?.url.pathname).toBe("/api/posts/s/publish"));
     await openMenu("Title d");
     expect(screen.getByRole("menuitem", { name: "Publish now" })).toBeInTheDocument();
@@ -398,6 +418,7 @@ describe("row actions", () => {
     renderPage();
     await openMenu("Title p");
     await userEvent.click(screen.getByRole("menuitem", { name: "Publish now" }));
+    await confirmDialog("Publish");
     await waitFor(() => expect(seen.calls).toHaveLength(1));
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
     await waitFor(() =>
@@ -405,6 +426,7 @@ describe("row actions", () => {
     );
     await openMenu("Title p");
     await userEvent.click(await screen.findByRole("menuitem", { name: "Unpublish" }));
+    await confirmDialog("Unpublish");
     await waitFor(() => expect(seen.calls).toHaveLength(2));
     expect(seen.calls[1].ifMatch).not.toBe(original);
     expect(Date.parse(seen.calls[1].ifMatch ?? "")).toBeGreaterThan(Date.parse(original));
@@ -424,6 +446,7 @@ describe("row actions", () => {
     await openMenu("Title p");
     const before = seen.lists.length;
     await userEvent.click(screen.getByRole("menuitem", { name: "Publish now" }));
+    await confirmDialog("Publish");
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith("This post changed — refresh"));
     expect(toast.success).not.toHaveBeenCalled();
     await waitFor(() => expect(seen.lists.length).toBeGreaterThan(before));
@@ -446,6 +469,29 @@ describe("row actions", () => {
       expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/ne/politics/badhi`),
     );
     expect(toast.success).toHaveBeenCalledWith("Link copied");
+  });
+
+  it("builds the public link from NEXT_PUBLIC_SITE_URL when it is set", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://mawapress.example/");
+    try {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      mockApi(editor, [
+        post("p", "published", {
+          translations: [{ locale: "ne", slug: "badhi", status: "published", title: "बाढी" }],
+        }),
+      ]);
+      renderPage();
+      await screen.findByText("बाढी");
+      await within(screen.getByRole("table")).findAllByText("Politics");
+      await openMenu("बाढी");
+      await userEvent.click(screen.getByRole("menuitem", { name: "Copy public link" }));
+      await waitFor(() =>
+        expect(writeText).toHaveBeenCalledWith("https://mawapress.example/ne/politics/badhi"),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("links Edit to the editor", async () => {
@@ -595,5 +641,186 @@ describe("schedule dialog", () => {
       post("p", "scheduled", { scheduled_at: at.toISOString() }),
     ]);
     expect(input.value).toBe(localValue(at));
+  });
+});
+
+describe("confirmations", () => {
+  const bilingual = (id: string, status: string) =>
+    post(id, status, {
+      translations: [
+        { locale: "ne", slug: "badhi", status: "draft", title: "मोरङमा बाढी" },
+        { locale: "en", slug: "flood", status: "draft", title: "Flood in Morang" },
+      ],
+    });
+
+  it("Publish now lists every translation and sends nothing until confirmed", async () => {
+    const seen = mockApi(editor, [bilingual("d", "draft")]);
+    renderPage();
+    await openMenu("मोरङमा बाढी");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Publish now" }));
+    const dialog = await screen.findByRole("dialog", { name: "Publish this post?" });
+    const list = within(dialog).getByRole("list", { name: "Versions going live" });
+    const entries = within(list).getAllByRole("listitem");
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toHaveTextContent("मोरङमा बाढी");
+    expect(entries[1]).toHaveTextContent("Flood in Morang");
+    expect(seen.calls).toHaveLength(0);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(seen.calls).toHaveLength(0);
+  });
+
+  it("Unpublish asks first and does nothing on Cancel", async () => {
+    const seen = mockApi(editor, [post("p", "published")]);
+    renderPage();
+    await openMenu("Title p");
+    await userEvent.click(screen.getByRole("menuitem", { name: "Unpublish" }));
+    const dialog = await screen.findByRole("dialog", { name: "Unpublish this post?" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(seen.calls).toHaveLength(0);
+  });
+});
+
+describe("dialogs on failure", () => {
+  it("send back stays open with the note and the error after a server failure", async () => {
+    const seen = mockApi(editor, [post("r", "in_review")]);
+    server.use(
+      http.post("*/api/posts/:id/send-back", () =>
+        HttpResponse.json(
+          { error: { code: "INTERNAL_ERROR", message: "Server exploded", details: {} } },
+          { status: 500 },
+        ),
+      ),
+    );
+    renderPage();
+    await openMenu("Title r");
+    await userEvent.click(screen.getByRole("menuitem", { name: /Send back/ }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText(/Note/), "Needs a source");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Send back" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Server exploded");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/Note/)).toHaveValue("Needs a source");
+    expect(within(dialog).getByRole("button", { name: "Send back" })).toBeEnabled();
+    expect(seen.calls).toHaveLength(0);
+  });
+
+  it("send back stays open after a network error", async () => {
+    mockApi(editor, [post("r", "in_review")]);
+    server.use(http.post("*/api/posts/:id/send-back", () => HttpResponse.error()));
+    renderPage();
+    await openMenu("Title r");
+    await userEvent.click(screen.getByRole("menuitem", { name: /Send back/ }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText(/Note/), "keep me");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Send back" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/reach the server/);
+    expect(within(dialog).getByLabelText(/Note/)).toHaveValue("keep me");
+  });
+
+  it("schedule stays open with the chosen time after a network error", async () => {
+    mockApi(editor, [post("p", "draft")]);
+    server.use(http.post("*/api/posts/:id/schedule", () => HttpResponse.error()));
+    renderPage();
+    await openMenu("Title p");
+    await userEvent.click(screen.getByRole("menuitem", { name: /schedule…/i }));
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByLabelText("Publish at") as HTMLInputElement;
+    const d = new Date(Date.now() + 86_400_000);
+    const p2 = (n: number) => String(n).padStart(2, "0");
+    const when = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}`;
+    fireEvent.change(input, { target: { value: when } });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Schedule" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/reach the server/);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(input.value).toBe(when);
+  });
+
+  it("keeps each row busy on its own while two actions run at once", async () => {
+    const rows = [
+      post("a", "draft", { author_id: reporter.id }),
+      post("b", "draft", { author_id: reporter.id }),
+    ];
+    mockApi(reporter, rows);
+    const releases: Record<string, () => void> = {};
+    server.use(
+      http.post("*/api/posts/:id/:action", async ({ params }) => {
+        await new Promise<void>((r) => (releases[String(params.id)] = r));
+        return HttpResponse.json({ ...rows.find((x) => x.id === params.id), status: "in_review" });
+      }),
+    );
+    renderPage();
+    for (const id of ["a", "b"]) {
+      await openMenu(`Title ${id}`);
+      await userEvent.click(screen.getByRole("menuitem", { name: "Submit for review" }));
+    }
+    const row = (id: string) => screen.getByRole("button", { name: `Actions for Title ${id}` });
+    await waitFor(() => expect(row("a")).toBeDisabled());
+    expect(row("b")).toBeDisabled();
+    await waitFor(() => expect(releases.a).toBeDefined());
+    releases.a();
+    await waitFor(() => expect(row("a")).toBeEnabled());
+    expect(row("b")).toBeDisabled(); // finishing A must not clear B
+    await waitFor(() => expect(releases.b).toBeDefined());
+    releases.b();
+    await waitFor(() => expect(row("b")).toBeEnabled());
+  });
+});
+
+describe("run error handling", () => {
+  it("shows a generic toast for a failure that is not an API error, with no unhandled rejection", async () => {
+    const { usePostActions } = await import("@/lib/admin/posts");
+    const { renderHook, act } = await import("@testing-library/react");
+    const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
+    const api = await import("@/lib/api");
+    const spy = vi.spyOn(api.api, "post").mockRejectedValueOnce(new TypeError("boom"));
+    const client = new QueryClient();
+    const { result } = renderHook(() => usePostActions(), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+    let outcome: Awaited<ReturnType<typeof result.current.run>> | undefined;
+    await act(async () => {
+      outcome = await result.current.run({ id: "x", updated_at: hoursAgo(1) }, { type: "submit" });
+    });
+    spy.mockRestore();
+    expect(outcome?.ok).toBe(false);
+    expect(toast.error).toHaveBeenCalledWith("Something went wrong. Try again.");
+    expect(result.current.pendingIds.size).toBe(0);
+  });
+});
+
+describe("feedback and small screens", () => {
+  it("flags a draft that an editor sent back, and not other statuses", async () => {
+    mockApi(reporter, [
+      post("f", "draft", {
+        author_id: reporter.id,
+        feedback_note: "Add a second source",
+        feedback_by_name: "Ed Editor",
+      }),
+      post("g", "in_review", {
+        author_id: reporter.id,
+        feedback_note: "stale note",
+        feedback_by_name: "Ed Editor",
+      }),
+    ]);
+    renderPage();
+    expect(await screen.findByText("Feedback from Ed Editor")).toBeInTheDocument();
+    expect(screen.getAllByText(/Feedback from/)).toHaveLength(1);
+  });
+
+  it("lets an editor filter by author from the title cell below lg, where the column is hidden", async () => {
+    mockApi(editor, [post("p", "draft")]);
+    renderPage();
+    const byline = (await screen.findByTestId("mobile-author")) as HTMLElement;
+    expect(byline).toHaveClass("lg:hidden");
+    await userEvent.click(
+      within(byline).getByRole("button", { name: /Show posts by Rita Reporter/ }),
+    );
+    expect(lastUrl()).toContain("author=u-rep");
+    // The select itself is always rendered, not hidden at any width.
+    expect(screen.getByLabelText("Author")).toBeVisible();
   });
 });

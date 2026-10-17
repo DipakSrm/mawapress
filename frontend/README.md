@@ -17,9 +17,10 @@ call to succeed.
 
 ## Environment
 
-| Variable      | Default                 | Purpose                                                             |
-| ------------- | ----------------------- | ------------------------------------------------------------------- |
-| `BACKEND_URL` | `http://127.0.0.1:8000` | Target of the `/api/*` and `/media/*` rewrites in `next.config.ts`. |
+| Variable               | Default                         | Purpose                                                                                                                     |
+| ---------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `BACKEND_URL`          | `http://127.0.0.1:8000`         | Target of the `/api/*` and `/media/*` rewrites in `next.config.ts`.                                                         |
+| `NEXT_PUBLIC_SITE_URL` | the origin the admin is open on | Public site origin (no trailing slash) for "Copy public link", media "Copy URL" and the SEO preview. Inlined at build time. |
 
 Rewrite destinations are baked in at build time (`next build` writes them to the routes manifest), so
 changing `BACKEND_URL` for a built app needs a rebuild. `npm run dev` picks it up on restart.

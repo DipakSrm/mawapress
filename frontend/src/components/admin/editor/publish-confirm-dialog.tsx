@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2 } from "lucide-react";
+import { AlertCircle, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,13 +34,20 @@ interface Props {
 /** Says exactly which versions go public, before the click that makes them public. */
 export function PublishConfirmDialog({ targets, single, onClose, onConfirm }: Props) {
   const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const goingLive = targets.filter((t) => !t.live);
 
   async function confirm() {
     if (pending) return;
     setPending(true);
-    await onConfirm();
-    onClose(); // success and failure are both reported by a toast
+    setError(null);
+    const result = await onConfirm();
+    if (result.ok) {
+      onClose();
+      return;
+    }
+    setError(result.error.message);
+    setPending(false);
   }
 
   return (
@@ -67,6 +74,12 @@ export function PublishConfirmDialog({ targets, single, onClose, onConfirm }: Pr
             </li>
           ))}
         </ul>
+        {error && (
+          <p role="alert" className="flex items-start gap-1.5 text-sm text-destructive">
+            <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0" />
+            <span>{error}</span>
+          </p>
+        )}
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose} disabled={pending}>
             Cancel

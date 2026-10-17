@@ -30,6 +30,7 @@ import {
   type PostOut,
 } from "@/lib/admin/posts";
 import { cn } from "@/lib/utils";
+import { ConfirmActionDialog } from "@/components/admin/posts/confirm-action-dialog";
 import { PublishConfirmDialog, type PublishTarget } from "./publish-confirm-dialog";
 import { SaveIndicator } from "./save-indicator";
 
@@ -54,7 +55,7 @@ interface Props {
   extra?: ReactNode;
 }
 
-type Dialog = "send-back" | "publish" | "publish-translation" | null;
+type Dialog = "send-back" | "publish" | "publish-translation" | "unpublish" | null;
 
 export function WorkflowBar({
   post,
@@ -176,7 +177,7 @@ export function WorkflowBar({
             variant="outline"
             size="sm"
             disabled={busy}
-            onClick={() => run({ type: "unpublish" })}
+            onClick={() => setDialog("unpublish")}
           >
             <Globe aria-hidden /> Unpublish
           </Button>
@@ -213,6 +214,16 @@ export function WorkflowBar({
         <SendBackDialog
           onClose={() => setDialog(null)}
           onSendBack={(note) => onRun({ type: "send-back", note: note || undefined })}
+        />
+      )}
+      {dialog === "unpublish" && (
+        <ConfirmActionDialog
+          title="Unpublish this post?"
+          description="Every language leaves the public site now and the post moves to the archive. Unarchive brings it back."
+          confirmLabel="Unpublish"
+          destructive
+          onClose={() => setDialog(null)}
+          onConfirm={() => onRun({ type: "unpublish" })}
         />
       )}
       {dialog === "publish" && (

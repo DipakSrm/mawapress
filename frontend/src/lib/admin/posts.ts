@@ -1,9 +1,9 @@
 "use client";
 
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { toast } from "sonner";
-import { api, ifMatch, isApiError, type ApiError, type components } from "@/lib/api";
+import { api, ApiError, ifMatch, isApiError, type components } from "@/lib/api";
 import { formatDateTime } from "./post-display";
 import { filtersToApiQuery, type PostFilters } from "./post-filters";
 
@@ -21,13 +21,7 @@ export function usePostList(filters: PostFilters) {
   });
 }
 
-export function useCategories() {
-  return useQuery({
-    queryKey: ["categories"],
-    queryFn: () => api.get<Category[]>("/api/categories"),
-    staleTime: 5 * 60_000,
-  });
-}
+export { useCategories } from "./taxonomy";
 
 // ---- who can do what -------------------------------------------------------------------------
 
@@ -176,6 +170,9 @@ function patchRow(list: PostList, out: PostOut): PostList {
             updated_at: out.updated_at,
             published_at: out.published_at,
             scheduled_at: out.scheduled_at,
+            feedback_note: out.feedback_note,
+            feedback_by_name: out.feedback_by_name,
+            feedback_at: out.feedback_at,
             translations: out.translations.map((t) => ({
               locale: t.locale,
               title: t.title,
@@ -200,7 +197,16 @@ export type ActionResult = { ok: true; post: PostOut } | { ok: false; error: Api
  */
 export function usePostActions() {
   const queryClient = useQueryClient();
-  const [pendingId, setPendingId] = useState<string | null>(null);
+  // Ids of rows with a request in flight. Counted, so two overlapping actions on one row do not
+  // clear each other, and actions on different rows never do.
+  const inFlight = useRef(new Map<string, number>());
+  const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(new Set());
+  const markPending = useCallback((id: string, delta: 1 | -1) => {
+    const next = (inFlight.current.get(id) ?? 0) + delta;
+    if (next > 0) inFlight.current.set(id, next);
+    else inFlight.current.delete(id);
+    setPendingIds(new Set(inFlight.current.keys()));
+  }, []);
 
   const run = useCallback(
     async (
@@ -208,7 +214,7 @@ export function usePostActions() {
       action: PostAction,
     ): Promise<ActionResult> => {
       const { path, body } = requestFor(action);
-      setPendingId(post.id);
+      markPending(post.id, 1);
       try {
         const out = await api.post<PostOut>(`/api/posts/${post.id}/${path}`, body, {
           headers: ifMatch(post.updated_at),
@@ -220,7 +226,14 @@ export function usePostActions() {
         toast.success(successMessage(action, out));
         return { ok: true, post: out };
       } catch (e) {
-        if (!isApiError(e)) throw e;
+        if (!isApiError(e)) {
+          // Not an API failure (a bug or a browser error): never leave it as an unhandled rejection.
+          toast.error("Something went wrong. Try again.");
+          return {
+            ok: false,
+            error: new ApiError(0, "UNEXPECTED_ERROR", "Something went wrong. Try again."),
+          };
+        }
         if (e.status === 412) {
           toast.error(CONFLICT_MESSAGE);
           void queryClient.invalidateQueries({ queryKey: ["posts"] });
@@ -232,11 +245,11 @@ export function usePostActions() {
         }
         return { ok: false, error: e };
       } finally {
-        setPendingId(null);
+        markPending(post.id, -1);
       }
     },
-    [queryClient],
+    [markPending, queryClient],
   );
 
-  return { run, pendingId };
+  return { run, pendingIds };
 }
