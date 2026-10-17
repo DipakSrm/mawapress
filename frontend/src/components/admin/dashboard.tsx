@@ -11,6 +11,7 @@ import {
   useRecentPosts,
   type PostSummary,
 } from "@/lib/admin/dashboard";
+import { STATUS_LABEL, STATUS_VARIANT, timeAgo } from "@/lib/admin/post-display";
 import { cn } from "@/lib/utils";
 
 function StatCard({
@@ -77,37 +78,11 @@ function StatCard({
   );
 }
 
-const STATUS_LABEL: Record<PostSummary["status"], string> = {
-  draft: "Draft",
-  in_review: "In review",
-  scheduled: "Scheduled",
-  published: "Published",
-  archived: "Archived",
-};
-
-const STATUS_VARIANT: Record<PostSummary["status"], "default" | "secondary" | "outline"> = {
-  draft: "secondary",
-  in_review: "outline",
-  scheduled: "outline",
-  published: "default",
-  archived: "secondary",
-};
-
 export function postTitle(post: PostSummary): { title: string; locale: string } {
   const t = post.translations.find((x) => x.locale === "ne") ?? post.translations[0];
   return t
     ? { title: t.title || "Untitled", locale: t.locale }
     : { title: "Untitled", locale: "en" };
-}
-
-function timeAgo(iso: string, now = Date.now()): string {
-  const diff = Date.parse(iso) - now;
-  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  const mins = Math.round(diff / 60_000);
-  if (Math.abs(mins) < 60) return rtf.format(mins, "minute");
-  const hours = Math.round(mins / 60);
-  if (Math.abs(hours) < 24) return rtf.format(hours, "hour");
-  return rtf.format(Math.round(hours / 24), "day");
 }
 
 function RecentActivity() {

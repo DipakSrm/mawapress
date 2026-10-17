@@ -44,6 +44,7 @@ export function setupAdminTest() {
     router.push.mockClear();
     nav.pathname = "/admin";
     nav.search = "";
+    nav.live = false;
   });
   afterEach(() => server.resetHandlers());
 }
