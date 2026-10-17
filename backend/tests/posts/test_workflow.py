@@ -43,7 +43,8 @@ async def test_editor_sends_back_in_review_post_with_note(client, session):
     in_review = await submit(client, reporter, await create_post_via_api(client, reporter, cat))
 
     r = await client.post(
-        f"/api/posts/{in_review['id']}/send-back", json={"note": "  Add a second source  "}, headers=auth_header(editor)
+        f"/api/posts/{in_review['id']}/send-back", json={"note": "  Add a second source  "},
+        headers=auth_if_match(editor, in_review["updated_at"]),
     )
     assert r.status_code == 200
     assert r.json()["status"] == "draft"
@@ -67,13 +68,19 @@ async def test_send_back_guards(client, session):
     cat = await make_category(session)
     draft = await create_post_via_api(client, reporter, cat)
 
-    not_in_review = await client.post(f"/api/posts/{draft['id']}/send-back", headers=auth_header(editor))
+    not_in_review = await client.post(
+        f"/api/posts/{draft['id']}/send-back", headers=auth_if_match(editor, draft["updated_at"])
+    )
     assert not_in_review.status_code == 409
     assert not_in_review.json()["error"]["code"] == "INVALID_TRANSITION"
 
-    await submit(client, reporter, draft)
-    assert (await client.post(f"/api/posts/{draft['id']}/send-back", headers=auth_header(reporter))).status_code == 403
-    no_body = await client.post(f"/api/posts/{draft['id']}/send-back", headers=auth_header(editor))
+    submitted = await submit(client, reporter, draft)
+    url = f"/api/posts/{draft['id']}/send-back"
+    assert (await client.post(url, headers=auth_if_match(reporter, submitted["updated_at"]))).status_code == 403
+    missing = await client.post(url, headers=auth_header(editor))
+    assert missing.status_code == 428
+    assert (await client.post(url, headers=auth_if_match(editor, draft["updated_at"]))).status_code == 412
+    no_body = await client.post(url, headers=auth_if_match(editor, submitted["updated_at"]))
     assert no_body.status_code == 200
     [event] = await events(session, "post.sent_back")
     assert event.payload["note"] is None

@@ -472,9 +472,12 @@ async def publish_translation(session: AsyncSession, post_id: uuid.UUID, locale:
     return await _save(session, post)
 
 
-async def send_back_post(session: AsyncSession, editor: User, post_id: uuid.UUID, note: str | None) -> Post:
+async def send_back_post(
+    session: AsyncSession, editor: User, post_id: uuid.UUID, if_match: str | None, note: str | None
+) -> Post:
     """in_review → draft, so the reporter can edit again. The note travels in the outbox payload."""
     post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
     if post.status != PostStatus.in_review:
         raise AppError(409, "INVALID_TRANSITION", f"Cannot send back a post that is {post.status.value}")
     post.status = PostStatus.draft

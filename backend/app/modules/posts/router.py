@@ -130,10 +130,11 @@ async def publish_translation(
 async def send_back_post(
     post_id: uuid.UUID,
     body: SendBackIn | None = None,
+    if_match: str | None = Header(default=None),
     user: User = Depends(editors),
     session: AsyncSession = Depends(get_session),
 ) -> Post:
-    return await service.send_back_post(session, user, post_id, body.note if body else None)
+    return await service.send_back_post(session, user, post_id, if_match, body.note if body else None)
 
 
 @router.post("/{post_id}/unpublish", response_model=PostOut)
