@@ -100,7 +100,9 @@ async def test_slug_change_guards(client, session):
         r = await change_slug(client, editor, live, bad)
         assert r.status_code == 422, bad
         assert r.json()["error"]["code"] == "INVALID_SLUG"
-    assert (await change_slug(client, editor, live, "a" * 81)).status_code == 422
+    too_long = await change_slug(client, editor, live, "a" * 81)
+    assert too_long.status_code == 422
+    assert too_long.json()["error"]["code"] == "INVALID_SLUG"
 
     own_draft = await create_post_via_api(client, reporter, cat, title="Reporter draft")
     denied = await change_slug(client, reporter, own_draft, "my-slug")

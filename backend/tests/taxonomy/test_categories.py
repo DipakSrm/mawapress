@@ -43,7 +43,9 @@ async def test_invalid_and_duplicate_slugs(client, session):
         r = await create_cat(client, editor, slug=bad)
         assert r.status_code == 422, bad
         assert r.json()["error"]["code"] == "INVALID_SLUG"
-    assert (await create_cat(client, editor, slug="a" * 81)).status_code == 422
+    too_long = await create_cat(client, editor, slug="a" * 81)
+    assert too_long.status_code == 422
+    assert too_long.json()["error"]["code"] == "INVALID_SLUG"
     dup = await create_cat(client, editor, slug="morang")
     assert dup.status_code == 409
     assert dup.json()["error"]["code"] == "SLUG_TAKEN"

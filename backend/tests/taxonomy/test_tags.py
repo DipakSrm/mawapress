@@ -43,6 +43,11 @@ async def test_tag_slug_rules(client, session):
     )
     assert bad.status_code == 422
     assert bad.json()["error"]["code"] == "INVALID_SLUG"
+    too_long = await client.post(
+        "/api/tags", json={"name_ne": "क", "name_en": "K", "slug": "a" * 81}, headers=auth_header(editor)
+    )
+    assert too_long.status_code == 422
+    assert too_long.json()["error"]["code"] == "INVALID_SLUG"
     immutable = await client.patch(f"/api/tags/{tag.id}", json={"slug": "other"}, headers=auth_header(editor))
     assert immutable.status_code == 422
 
