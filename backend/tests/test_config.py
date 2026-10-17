@@ -4,6 +4,20 @@ from pydantic import ValidationError
 from app.core.config import Settings
 
 
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    monkeypatch.delenv("MAWA_COOKIE_SECURE", raising=False)  # conftest sets it false for the http test client
+
+
+def test_production_rejects_insecure_cookies():
+    with pytest.raises(ValidationError):
+        Settings(env="production", jwt_secret="x" * 40, cookie_secure=False)
+
+
+def test_dev_allows_insecure_cookies():
+    assert Settings(env="dev", cookie_secure=False).cookie_secure is False
+
+
 def test_production_rejects_default_secret():
     with pytest.raises(ValidationError):
         Settings(env="production")

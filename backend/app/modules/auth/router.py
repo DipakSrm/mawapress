@@ -68,7 +68,9 @@ def require_csrf(
     csrf_cookie: str | None = Cookie(default=None, alias=CSRF_COOKIE),
     csrf_header: str | None = Header(default=None, alias="X-CSRF-Token"),
 ) -> None:
-    if not csrf_cookie or not csrf_header or not secrets.compare_digest(csrf_cookie, csrf_header):
+    if not csrf_cookie or not csrf_header or not secrets.compare_digest(
+        csrf_cookie.encode("utf-8", "surrogatepass"), csrf_header.encode("utf-8", "surrogatepass")
+    ):
         raise AppError(403, "CSRF_FAILED", "CSRF token missing or invalid")
 
 

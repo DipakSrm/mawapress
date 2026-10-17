@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Uuid, func
+from sqlalchemy import DateTime, ForeignKey, String, Uuid, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, utcnow
@@ -20,3 +20,4 @@ class RefreshToken(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     replaced_by: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    token_version: Mapped[int] = mapped_column(default=0, server_default=text("0"))  # users.token_version at issue

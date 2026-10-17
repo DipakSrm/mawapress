@@ -29,7 +29,7 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_access_token(user_id: uuid.UUID, role: str, token_version: int = 0) -> str:
+def create_access_token(user_id: uuid.UUID, role: str, token_version: int) -> str:
     settings = get_settings()
     now = utcnow()
     claims = {"sub": str(user_id), "role": role, "tv": token_version, "iat": now, "exp": now + timedelta(minutes=settings.jwt_access_minutes)}

@@ -1,4 +1,5 @@
 import hashlib
+import ipaddress
 import logging
 
 from fastapi import Depends, Request
@@ -54,8 +55,10 @@ def client_ip(request: Request) -> str:
     if get_settings().trust_proxy:
         forwarded = request.headers.get("x-forwarded-for", "")
         first = forwarded.split(",")[0].strip()
-        if first:
-            return first
+        try:
+            return str(ipaddress.ip_address(first))
+        except ValueError:
+            pass  # missing or malformed: fall back to the socket peer
     return request.client.host if request.client else "unknown"
 
 

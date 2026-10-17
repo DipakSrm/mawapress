@@ -79,3 +79,24 @@ async def test_token_without_matching_tv_is_rejected(client, session):
     await assert_invalid_token(client, forged(base))
     await assert_invalid_token(client, forged({**base, "tv": user.token_version + 1}))
     await assert_invalid_token(client, forged({**base, "tv": "0"}))
+
+
+async def test_pre_change_refresh_token_cannot_mint_after_password_change(client, session):
+    from tests.auth.test_refresh import explicit
+
+    user = await make_user(session, email="e@mawapress.com", password=PASSWORD)
+    headers = await login_as(client, "e@mawapress.com")
+    old = client.cookies.get("mawa_refresh")
+    csrf = client.cookies.get("mawa_csrf")
+    row = (await session.scalars(select(RefreshToken))).one()
+    r = await client.patch(
+        "/api/auth/me", json={"current_password": PASSWORD, "new_password": "brand-new-pass-2"}, headers=headers
+    )
+    assert r.status_code == 200
+    # as if a racing rotation had left a live token minted before the change
+    row.revoked_at = None
+    await session.flush()
+    out = await client.post("/api/auth/refresh", headers=explicit(old, csrf, csrf))
+    assert out.status_code == 401
+    assert out.json()["error"]["code"] == "INVALID_TOKEN"
+    assert user.token_version >= 1

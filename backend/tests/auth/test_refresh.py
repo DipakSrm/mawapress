@@ -73,6 +73,67 @@ async def test_refresh_rotates_and_new_access_token_works(client, session):
     assert again.status_code == 401
 
 
+async def age_revocations(session, seconds: int) -> None:
+    for row in (await session.scalars(select(RefreshToken))).all():
+        if row.revoked_at is not None:
+            row.revoked_at = row.revoked_at - timedelta(seconds=seconds)
+    await session.flush()
+
+
+async def test_reuse_within_grace_is_stale_and_keeps_family_alive(client, session):
+    await make_user(session, email=EMAIL, password=PASSWORD)
+    await login(client)
+    first = client.cookies.get("mawa_refresh")
+    await client.post("/api/auth/refresh", headers=csrf_headers(client))
+    newest = client.cookies.get("mawa_refresh")
+    csrf = client.cookies.get("mawa_csrf")
+
+    stale = await client.post("/api/auth/refresh", headers=explicit(first, csrf, csrf))
+    assert stale.status_code == 401
+    assert stale.json()["error"]["code"] == "REFRESH_STALE"
+    # the family is untouched: the newest token still rotates
+    ok = await client.post("/api/auth/refresh", headers=explicit(newest, csrf, csrf))
+    assert ok.status_code == 200
+
+
+async def test_refresh_token_with_outdated_token_version_is_rejected(client, session):
+    user = await make_user(session, email=EMAIL, password=PASSWORD)
+    await login(client)
+    # simulate a rotation that raced a revocation: the bump happened, the token was not revoked
+    user.token_version += 1
+    await session.flush()
+    r = await client.post("/api/auth/refresh", headers=csrf_headers(client))
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "INVALID_TOKEN"
+    rows = (await session.scalars(select(RefreshToken))).all()
+    assert all(row.revoked_at is not None for row in rows)
+    again = await client.post("/api/auth/refresh", headers=csrf_headers(client))
+    assert again.status_code == 401
+
+
+async def test_refresh_tokens_record_the_users_token_version(client, session):
+    user = await make_user(session, email=EMAIL, password=PASSWORD)
+    user.token_version = 3
+    await session.flush()
+    await login(client)
+    await client.post("/api/auth/refresh", headers=csrf_headers(client))
+    rows = (await session.scalars(select(RefreshToken))).all()
+    assert len(rows) == 2 and {row.token_version for row in rows} == {3}
+
+
+async def test_non_ascii_csrf_values_are_403_not_500(client, session):
+    await make_user(session, email=EMAIL, password=PASSWORD)
+    await login(client)
+    token = client.cookies.get("mawa_refresh")
+    csrf = client.cookies.get("mawa_csrf")
+    non_ascii = "café".encode()
+    for cookie_csrf, header_csrf in ((csrf.encode(), non_ascii), (non_ascii, csrf.encode())):
+        headers = {"Cookie": b"mawa_refresh=" + token.encode() + b"; mawa_csrf=" + cookie_csrf, "X-CSRF-Token": header_csrf}
+        r = await client.post("/api/auth/refresh", headers=headers)
+        assert r.status_code == 403, headers
+        assert r.json()["error"]["code"] == "CSRF_FAILED"
+
+
 async def test_reusing_rotated_token_revokes_family(client, session):
     await make_user(session, email=EMAIL, password=PASSWORD)
     await login(client)
@@ -80,6 +141,7 @@ async def test_reusing_rotated_token_revokes_family(client, session):
     await client.post("/api/auth/refresh", headers=csrf_headers(client))
     newest = client.cookies.get("mawa_refresh")
     csrf = client.cookies.get("mawa_csrf")
+    await age_revocations(session, seconds=11)
 
     reuse = await client.post("/api/auth/refresh", headers=explicit(first, csrf, csrf))
     assert reuse.status_code == 401

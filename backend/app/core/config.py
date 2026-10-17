@@ -22,13 +22,15 @@ class Settings(BaseSettings):
     rate_limit_window_seconds: int = 60
 
     @model_validator(mode="after")
-    def _require_strong_secret_outside_dev(self) -> "Settings":
+    def _require_safe_settings_outside_dev(self) -> "Settings":
         if self.env != "dev" and (
             self.jwt_secret == DEFAULT_JWT_SECRET or len(self.jwt_secret) < MIN_JWT_SECRET_LENGTH
         ):
             raise ValueError(
                 f"MAWA_JWT_SECRET must be set to at least {MIN_JWT_SECRET_LENGTH} random characters when env is not 'dev'"
             )
+        if self.env != "dev" and not self.cookie_secure:
+            raise ValueError("MAWA_COOKIE_SECURE must be true when env is not 'dev'")
         return self
 
 

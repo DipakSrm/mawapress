@@ -55,6 +55,6 @@ All settings are read from `MAWA_*` environment variables or `.env`; see `.env.e
 Session and rate-limit settings:
 
 - `MAWA_REFRESH_DAYS` (default `14`): lifetime of the refresh-token cookie.
-- `MAWA_COOKIE_SECURE` (default `true`): sets the `Secure` flag on auth cookies. Set it to `false` for plain-http local development; the shipped `.env.example` does this.
-- `MAWA_TRUST_PROXY` (default `false`): use the first `X-Forwarded-For` entry as the client IP for rate limiting. Enable only behind a proxy that sets the header.
+- `MAWA_COOKIE_SECURE` (default `true`): sets the `Secure` flag on auth cookies. Set it to `false` for plain-http local development; the shipped `.env.example` does this. The app refuses to start with `false` when `MAWA_ENV` is not `dev`.
+- `MAWA_TRUST_PROXY` (default `false`): use the first `X-Forwarded-For` entry as the client IP for rate limiting. Enable only behind a proxy that overwrites the header with the real client address rather than appending to it; only the first entry is used, and it is ignored (falling back to the socket peer) unless it is a valid IP address.
 - `MAWA_RATE_LIMIT_WINDOW_SECONDS` (default `60`): window for the login (5 per IP+email, 20 per IP) and public search (30 per IP) limits.
