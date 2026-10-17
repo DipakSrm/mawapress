@@ -296,7 +296,8 @@ async def test_trending_with_no_views_falls_back_with_short_cache(client, sessio
     r = await trending(client)
     assert [x["id"] for x in r.json()] == [str(b), str(a)]
     assert r.headers["cache-control"] == "public, s-maxage=15"
-    assert 0 < await fake_redis.ttl("public:trending:padded:ne:10") <= 15
+    gen = await fake_redis.get("public:feeds:gen")
+    assert 0 < await fake_redis.ttl(f"public:trending:padded:{gen}:ne:10") <= 15
     again = await trending(client)
     assert again.headers["x-cache"] == "HIT" and again.headers["cache-control"] == "public, s-maxage=15"
 
@@ -316,6 +317,43 @@ async def test_trending_partial_ranking_is_padded_without_duplicates(client, ses
     full = await trending(client, limit=1)
     assert [x["id"] for x in full.json()] == [str(c)]
     assert full.headers["cache-control"] == "public, s-maxage=60, stale-while-revalidate=86400"
+
+
+async def unpublish(client, session, post_id):
+    editor = await make_user(session, role=Role.editor)
+    row = await session.get(Post, post_id)
+    r = await client.post(
+        f"/api/posts/{post_id}/unpublish", headers=auth_if_match(editor, row.updated_at.isoformat())
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_unpublishing_invalidates_the_cached_trending_list(client, session, fake_redis):
+    a = await live_post(client, session, title="क")
+    b = await live_post(client, session, title="ख")
+    await seed_views(fake_redis, "ne", a, 9)
+    await seed_views(fake_redis, "ne", b, 5)
+    first = await trending(client, limit=2)  # full: both ranked from Redis
+    assert [x["id"] for x in first.json()] == [str(a), str(b)]
+    assert (await trending(client, limit=2)).headers["x-cache"] == "HIT"
+    await unpublish(client, session, a)
+    after = await trending(client, limit=2)
+    assert after.headers["x-cache"] == "MISS"
+    assert [x["id"] for x in after.json()] == [str(b)]
+
+
+async def test_unpublishing_invalidates_the_padded_trending_list_too(client, session, fake_redis):
+    a = await live_post(client, session, title="क")
+    b = await live_post(client, session, title="ख")
+    await session.execute(update(Post).where(Post.id == a).values(view_count=5))
+    await session.flush()
+    first = await trending(client)  # no Redis views: padded from view_count
+    assert {x["id"] for x in first.json()} == {str(a), str(b)}
+    assert (await trending(client)).headers["x-cache"] == "HIT"
+    await unpublish(client, session, a)
+    after = await trending(client)
+    assert after.headers["x-cache"] == "MISS"
+    assert [x["id"] for x in after.json()] == [str(b)]
 
 
 class RepeatingScanRedis:

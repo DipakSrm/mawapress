@@ -41,8 +41,9 @@ def hour_bucket_key(locale: str, when: datetime) -> str:
     return f"trending:{locale}:{when:%Y%m%d%H}"
 
 
-def trending_cache_key(locale: str, limit: int, padded: bool = False) -> str:
-    return f"public:trending{':padded' if padded else ''}:{locale}:{limit}"
+def trending_cache_key(gen: str, locale: str, limit: int, padded: bool = False) -> str:
+    """Keyed by the feed generation, so anything that invalidates feeds (unpublish included) invalidates this."""
+    return f"public:trending{':padded' if padded else ''}:{gen}:{locale}:{limit}"
 
 
 def daily_salt(day: str) -> bytes:

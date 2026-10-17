@@ -402,8 +402,11 @@ async def public_trending(
     redis: Redis = Depends(get_redis),
 ) -> list[PublicCard]:
     _require_locale(locale)
+    gen = await feed_generation(redis)  # None: Redis unavailable, so no cache read or write
     for padded in (False, True):
-        cached = await cached_model(redis, stats.trending_cache_key(locale, limit, padded), list[PublicCard])
+        if gen is None:
+            break
+        cached = await cached_model(redis, stats.trending_cache_key(gen, locale, limit, padded), list[PublicCard])
         if cached is not None:
             response.headers["X-Cache"] = "HIT"
             response.headers["Cache-Control"] = TRENDING_PADDED_CONTROL if padded else CACHE_CONTROL
@@ -419,9 +422,10 @@ async def public_trending(
     if padded:
         out += await stats.top_by_view_count(session, locale, limit - len(out), exclude={c.id for c in out})
     response.headers["Cache-Control"] = TRENDING_PADDED_CONTROL if padded else CACHE_CONTROL
-    await cache_set(
-        redis, stats.trending_cache_key(locale, limit, padded), _cards.dump_json(out).decode(),
-        ttl=TRENDING_PADDED_TTL if padded else CACHE_TTL_SECONDS,
-    )
+    if gen is not None:
+        await cache_set(
+            redis, stats.trending_cache_key(gen, locale, limit, padded), _cards.dump_json(out).decode(),
+            ttl=TRENDING_PADDED_TTL if padded else CACHE_TTL_SECONDS,
+        )
     response.headers["X-Cache"] = "MISS"
     return out
