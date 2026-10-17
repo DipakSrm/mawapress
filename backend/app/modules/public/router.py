@@ -3,11 +3,9 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from typing import Literal
-
 from pydantic import BaseModel, TypeAdapter
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -391,6 +389,8 @@ async def count_view(
 
 
 _cards = TypeAdapter(list[PublicCard])
+TRENDING_PADDED_TTL = 15
+TRENDING_PADDED_CONTROL = "public, s-maxage=15"
 
 
 @router.get("/trending", response_model=list[PublicCard])
@@ -402,18 +402,26 @@ async def public_trending(
     redis: Redis = Depends(get_redis),
 ) -> list[PublicCard]:
     _require_locale(locale)
-    response.headers["Cache-Control"] = CACHE_CONTROL
-    key = stats.trending_cache_key(locale, limit)
-    cached = await cached_model(redis, key, list[PublicCard])
-    if cached is not None:
-        response.headers["X-Cache"] = "HIT"
-        return cached
+    for padded in (False, True):
+        cached = await cached_model(redis, stats.trending_cache_key(locale, limit, padded), list[PublicCard])
+        if cached is not None:
+            response.headers["X-Cache"] = "HIT"
+            response.headers["Cache-Control"] = TRENDING_PADDED_CONTROL if padded else CACHE_CONTROL
+            return cached
     try:
         out = await stats.top_by_redis(session, redis, locale, limit)
     except RedisError:
         logger.warning("Trending unavailable from Redis; falling back to view_count", exc_info=True)
         response.headers["X-Cache"] = "BYPASS"
+        response.headers["Cache-Control"] = TRENDING_PADDED_CONTROL
         return await stats.top_by_view_count(session, locale, limit)
-    await cache_set(redis, key, _cards.dump_json(out).decode())
+    padded = len(out) < limit  # a quiet day: top up from the most-viewed recent posts, Redis ranking first
+    if padded:
+        out += await stats.top_by_view_count(session, locale, limit - len(out), exclude={c.id for c in out})
+    response.headers["Cache-Control"] = TRENDING_PADDED_CONTROL if padded else CACHE_CONTROL
+    await cache_set(
+        redis, stats.trending_cache_key(locale, limit, padded), _cards.dump_json(out).decode(),
+        ttl=TRENDING_PADDED_TTL if padded else CACHE_TTL_SECONDS,
+    )
     response.headers["X-Cache"] = "MISS"
     return out

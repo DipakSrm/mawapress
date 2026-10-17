@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -228,7 +229,8 @@ async def test_trending_orders_by_recent_views_and_respects_locale_and_limit(cli
     assert r.json()[0]["title"] == "ख"
     assert [x["id"] for x in (await trending(client, limit=2)).json()] == [str(b), str(c)]
     en = (await trending(client, "en")).json()
-    assert [x["id"] for x in en] == [str(c)] and en[0]["title"] == "Gamma"
+    assert en[0]["id"] == str(c) and en[0]["title"] == "Gamma"
+    assert {x["id"] for x in en} == {str(a), str(b), str(c)}  # only c had en views; the rest is top-up
     assert [k async for k in fake_redis.scan_iter(match="trending:tmp:*")] == []
 
 
@@ -283,3 +285,91 @@ def test_flush_views_is_registered_as_a_timed_cron():
     jobs = {c.name: c for c in WorkerSettings.cron_jobs}
     job = jobs["cron:flush_views"]
     assert job.coroutine is flush_views and job.second == 0 and job.timeout_s <= 55
+
+
+async def test_trending_with_no_views_falls_back_with_short_cache(client, session, fake_redis):
+    a = await live_post(client, session, title="क")
+    b = await live_post(client, session, title="ख")
+    await session.execute(update(Post).where(Post.id == a).values(view_count=1))
+    await session.execute(update(Post).where(Post.id == b).values(view_count=5))
+    await session.flush()
+    r = await trending(client)
+    assert [x["id"] for x in r.json()] == [str(b), str(a)]
+    assert r.headers["cache-control"] == "public, s-maxage=15"
+    assert 0 < await fake_redis.ttl("public:trending:padded:ne:10") <= 15
+    again = await trending(client)
+    assert again.headers["x-cache"] == "HIT" and again.headers["cache-control"] == "public, s-maxage=15"
+
+
+async def test_trending_partial_ranking_is_padded_without_duplicates(client, session, fake_redis):
+    a = await live_post(client, session, title="क")
+    b = await live_post(client, session, title="ख")
+    c = await live_post(client, session, title="ग")
+    await session.execute(update(Post).where(Post.id == a).values(view_count=100))
+    await session.execute(update(Post).where(Post.id == b).values(view_count=50))
+    await session.execute(update(Post).where(Post.id == c).values(view_count=1))
+    await session.flush()
+    await seed_views(fake_redis, "ne", c, 4)
+    r = await trending(client, limit=3)
+    assert [x["id"] for x in r.json()] == [str(c), str(a), str(b)]  # Redis first, then by view_count
+    assert r.headers["cache-control"] == "public, s-maxage=15"
+    full = await trending(client, limit=1)
+    assert [x["id"] for x in full.json()] == [str(c)]
+    assert full.headers["cache-control"] == "public, s-maxage=60, stale-while-revalidate=86400"
+
+
+class RepeatingScanRedis:
+    """Delegates to fakeredis, but SCAN yields every key twice."""
+
+    def __init__(self, inner, between=None):
+        self.inner, self.between = inner, between
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    async def scan_iter(self, *args, **kwargs):
+        async for key in self.inner.scan_iter(*args, **kwargs):
+            yield key
+            yield key
+            if self.between:
+                await self.between()
+                self.between = None
+
+
+async def test_flush_accumulates_a_key_scanned_twice(client, session, fake_redis):
+    pid = await live_post(client, session)
+    await fake_redis.set(pending_key(pid), 3)
+
+    async def view_arrives():
+        await fake_redis.incrby(pending_key(pid), 4)
+
+    redis = RepeatingScanRedis(fake_redis, between=None)
+    original = redis.scan_iter
+
+    async def scan_with_midway_view(*args, **kwargs):
+        first = True
+        async for key in original(*args, **kwargs):
+            yield key
+            if first:
+                first = False
+                await view_arrives()  # lands between the first and second sighting of the key
+
+    redis.scan_iter = scan_with_midway_view
+    assert await flush_views(make_ctx(session, redis)) == 7
+    assert (await session.get(Post, pid, populate_existing=True)).view_count == 7
+    assert await pending(fake_redis, pid) == 0
+
+
+async def test_cancelled_flush_returns_taken_counts_to_redis(client, session, fake_redis):
+    pid = await live_post(client, session)
+    await fake_redis.set(pending_key(pid), 6)
+
+    @asynccontextmanager
+    async def cancelled():
+        raise asyncio.CancelledError  # the arq timeout landing during the DB update
+        yield  # pragma: no cover
+
+    with pytest.raises(asyncio.CancelledError):
+        await flush_views({"session_factory": cancelled, "cache_redis": fake_redis})
+    assert await pending(fake_redis, pid) == 6
+    assert (await session.get(Post, pid, populate_existing=True)).view_count == 0

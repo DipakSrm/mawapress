@@ -49,37 +49,46 @@ async def _apply(factory, counts: dict[uuid.UUID, int]) -> set[uuid.UUID]:
 
 async def flush_views(ctx: dict) -> int:
     """Cron entry point. ctx carries `session_factory` and `cache_redis`. Returns the views taken from Redis
-    and applied (counts for posts that no longer exist are dropped)."""
+    and applied (counts for posts that no longer exist are dropped).
+
+    `batch` holds counts that left Redis but are not yet committed. Whatever stops the run (a DB error, or
+    the arq timeout cancelling it) puts them back with INCRBY."""
     factory, redis = ctx["session_factory"], ctx["cache_redis"]
     flushed = 0
     batch: dict[uuid.UUID, int] = {}
 
     async def commit_batch() -> None:
-        nonlocal flushed, batch
+        nonlocal flushed
         if not batch:
             return
-        taken, batch = batch, {}
         try:
-            updated = await _apply(factory, taken)
+            updated = await _apply(factory, dict(batch))
         except Exception:
-            log.exception("view flush failed; %d posts' counts returned to Redis", len(taken))
-            await _restore(redis, taken)
+            log.exception("view flush failed; %d posts' counts returned to Redis", len(batch))
+            await _restore(redis, batch)
+            batch.clear()
             return
-        flushed += sum(n for pid, n in taken.items() if pid in updated)
+        flushed += sum(n for pid, n in batch.items() if pid in updated)
+        batch.clear()
 
     try:
-        async for key in redis.scan_iter(match=f"{PENDING_PREFIX}*", count=BATCH_SIZE):
-            try:
-                post_id = uuid.UUID(key.removeprefix(PENDING_PREFIX))
-            except ValueError:
-                await redis.delete(key)  # not ours to keep
-                continue
-            n = await _take(redis, key)
-            if n > 0:
-                batch[post_id] = n
-            if len(batch) >= BATCH_SIZE:
-                await commit_batch()
-    except RedisError:
-        log.warning("view flush could not read Redis; retrying next tick", exc_info=True)
-    await commit_batch()
+        try:
+            async for key in redis.scan_iter(match=f"{PENDING_PREFIX}*", count=BATCH_SIZE):
+                try:
+                    post_id = uuid.UUID(key.removeprefix(PENDING_PREFIX))
+                except ValueError:
+                    await redis.delete(key)  # not ours to keep
+                    continue
+                n = await _take(redis, key)
+                if n > 0:
+                    batch[post_id] = batch.get(post_id, 0) + n  # SCAN may return a key twice
+                if len(batch) >= BATCH_SIZE:
+                    await commit_batch()
+        except RedisError:
+            log.warning("view flush could not read Redis; retrying next tick", exc_info=True)
+        await commit_batch()
+    except BaseException:
+        if batch:  # cancelled (or killed) between take and commit
+            await _restore(redis, batch)
+        raise
     return flushed

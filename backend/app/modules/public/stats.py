@@ -41,8 +41,8 @@ def hour_bucket_key(locale: str, when: datetime) -> str:
     return f"trending:{locale}:{when:%Y%m%d%H}"
 
 
-def trending_cache_key(locale: str, limit: int) -> str:
-    return f"public:trending:{locale}:{limit}"
+def trending_cache_key(locale: str, limit: int, padded: bool = False) -> str:
+    return f"public:trending{':padded' if padded else ''}:{locale}:{limit}"
 
 
 def daily_salt(day: str) -> bytes:
@@ -114,12 +114,14 @@ async def top_by_redis(session: AsyncSession, redis: Redis, locale: str, limit: 
     return await cards_in_order(session, locale, ids, limit)
 
 
-async def top_by_view_count(session: AsyncSession, locale: str, limit: int) -> list[PublicCard]:
-    """Fallback when Redis is down: the most-viewed posts published in the last 7 days."""
+async def top_by_view_count(
+    session: AsyncSession, locale: str, limit: int, exclude: set[uuid.UUID] = frozenset()
+) -> list[PublicCard]:
+    """The most-viewed posts published in the last 7 days (Redis-down fallback, and top-up for quiet days)."""
     since = utcnow() - timedelta(days=FALLBACK_DAYS)
     stmt = (
         card_query(locale)
-        .where(Post.published_at >= since)
+        .where(Post.published_at >= since, Post.id.not_in(list(exclude)))
         .order_by(Post.view_count.desc(), *NEWEST_FIRST)
         .limit(limit)
     )
