@@ -1,5 +1,8 @@
 import logging
+from functools import cache
+from typing import Any, TypeVar
 
+from pydantic import TypeAdapter
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
@@ -51,6 +54,30 @@ async def cache_get(redis: Redis, key: str) -> str | None:
     except RedisError:
         logger.warning("Cache read failed; serving from database", exc_info=True)
         return None
+
+
+T = TypeVar("T")
+
+
+@cache
+def _adapter(model: Any) -> TypeAdapter:
+    return TypeAdapter(model)
+
+
+def parse_cached(raw: str, model: type[T], key: str) -> T | None:
+    """Parse a cached JSON string; an entry that no longer fits the model (an older deploy wrote
+    it, or it is corrupt) is a cache miss, never an error. `model` may be any pydantic-validatable type."""
+    try:
+        return _adapter(model).validate_json(raw)
+    except ValueError:  # pydantic.ValidationError and malformed JSON are both ValueErrors
+        logger.warning("Ignoring unreadable cache entry %s", key, exc_info=True)
+        return None
+
+
+async def cached_model(redis: Redis, key: str, model: type[T]) -> T | None:
+    """The cached value under key as `model`, or None on a miss, a Redis error or a stale shape."""
+    raw = await cache_get(redis, key)
+    return parse_cached(raw, model, key) if raw else None
 
 
 async def cache_set(redis: Redis, key: str, value: str, ttl: int = CACHE_TTL_SECONDS) -> None:

@@ -20,6 +20,8 @@ from app.modules.public.service import (
     NOT_FOUND_MARKER,
     cache_get,
     cache_set,
+    cached_model,
+    parse_cached,
     categories_cache_key,
     category_feed_cache_key,
     feed_generation,
@@ -39,7 +41,7 @@ from app.modules.users.models import User
 router = APIRouter(prefix="/api/public", tags=["public"])
 
 SUPPORTED_LOCALES = ("ne", "en")
-_category_tree = TypeAdapter(list[CategoryNode])
+_category_tree = TypeAdapter(list[CategoryNode])  # dumping only; reads go through cached_model
 
 
 def _require_locale(locale: str) -> None:
@@ -62,10 +64,10 @@ async def _cached_feed(
     response.headers["Cache-Control"] = CACHE_CONTROL
     gen = await feed_generation(redis)
     key = make_key(gen) if gen is not None else None
-    cached = await cache_get(redis, key) if key else None
-    if cached:
+    cached = await cached_model(redis, key, model) if key else None
+    if cached is not None:
         response.headers["X-Cache"] = "HIT"
-        return model.model_validate_json(cached)
+        return cached
     out = await build()
     if key:
         await cache_set(redis, key, out.model_dump_json())
@@ -112,9 +114,10 @@ async def get_public_post(
     cached = await cache_get(redis, key)
     if cached == NOT_FOUND_MARKER:
         raise _post_not_found()
-    if cached:
+    hit = parse_cached(cached, PublicPostOut, key) if cached else None
+    if hit is not None:
         response.headers["X-Cache"] = "HIT"
-        return PublicPostOut.model_validate_json(cached)
+        return hit
 
     row = (await session.execute(
         select(PostTranslation, Post)
@@ -164,10 +167,10 @@ async def public_categories(
     response.headers["Cache-Control"] = CACHE_CONTROL
     gen = await feed_generation(redis)
     key = categories_cache_key(gen) if gen is not None else None
-    cached = await cache_get(redis, key) if key else None
-    if cached:
+    cached = await cached_model(redis, key, list[CategoryNode]) if key else None
+    if cached is not None:
         response.headers["X-Cache"] = "HIT"
-        return _category_tree.validate_json(cached)
+        return cached
     tree = await taxonomy_service.category_tree(session)
     if key:
         await cache_set(redis, key, _category_tree.dump_json(tree).decode())
@@ -245,9 +248,10 @@ async def resolve_redirect(
     cached = await cache_get(redis, key)
     if cached == NOT_FOUND_MARKER:
         raise _redirect_not_found()
-    if cached:
+    hit = parse_cached(cached, RedirectOut, key) if cached else None
+    if hit is not None:
         response.headers["X-Cache"] = "HIT"
-        return RedirectOut.model_validate_json(cached)
+        return hit
     row = await seo_service.resolve_redirect(session, path)
     if row is None:
         await cache_set(redis, key, NOT_FOUND_MARKER, ttl=CACHE_TTL_SECONDS)
