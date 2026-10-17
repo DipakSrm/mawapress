@@ -5,6 +5,7 @@ from app.core.config import get_settings
 from app.core.limits import BodyLimitMiddleware
 from app.core.errors import register_error_handlers
 from app.modules.auth.router import router as auth_router
+from app.modules.importer.router import router as import_router
 from app.modules.jobs.router import router as jobs_router
 from app.modules.media.router import router as media_router
 from app.modules.posts.router import router as posts_router
@@ -24,6 +25,7 @@ def create_app() -> FastAPI:
     app.include_router(public_router)
     app.include_router(media_router)
     app.include_router(jobs_router)
+    app.include_router(import_router)
 
     settings = get_settings()
     if settings.storage == "local":

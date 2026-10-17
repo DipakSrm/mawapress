@@ -19,6 +19,7 @@ dependencies = [
   "pillow>=13.0.0",
   "boto3>=1.43.114",
   "python-multipart>=0.0.32",
+  "mammoth>=1.13.0",
 ]
 
 [dependency-groups]
@@ -29,6 +30,7 @@ dev = [
   "testcontainers[postgres]>=4.8",
   "fakeredis>=2.26",
   "ruff>=0.8",
+  "python-docx>=1.2.0",
 ]
 
 [tool.uv]
