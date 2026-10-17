@@ -342,8 +342,10 @@ async def update_post(
         redirects.append(redirect)
 
     category_moved_publicly = False
+    old_category_id: int | None = None
     if new_category is not None:
         old_category = await session.get(Category, post.category_id)
+        old_category_id = old_category.id
         post.category_id = new_category.id
         if post.status == PostStatus.published:
             for t in post.translations:
@@ -375,6 +377,8 @@ async def update_post(
     )
     if public_changed:
         event = _post_event("post.updated", post)
+        if old_category_id is not None:  # lets the worker revalidate the category it left
+            event.payload = {**event.payload, "old_category_id": old_category_id}
         if redirects:  # lets the worker purge the old URLs
             event.payload = {**event.payload, "redirects": redirects}
             if redirect is not None:

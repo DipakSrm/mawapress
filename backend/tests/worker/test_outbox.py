@@ -8,7 +8,7 @@ from sqlalchemy import func, select, update
 from app.core.config import Settings
 from app.db.base import utcnow
 from app.db.outbox import OutboxEvent
-from app.worker.outbox import MAX_ATTEMPTS, process_outbox
+from app.worker.outbox import BATCH_SIZE, LEASE_SECONDS, MAX_ATTEMPTS, process_outbox
 from tests.factories import make_category
 
 FULL = dict(
@@ -43,7 +43,11 @@ class Recorder:
 def make_ctx(session, http, settings=None) -> dict:
     @asynccontextmanager
     async def factory():
-        yield session  # the test session owns the rollback
+        try:
+            yield session  # the test session owns the outer rollback
+        except Exception:
+            await session.rollback()  # what closing a real per-call session does
+            raise
 
     return {"session_factory": factory, "http": http, "settings": settings or make_settings()}
 
@@ -205,12 +209,12 @@ async def test_due_retry_is_picked_up(session):
 
 async def test_batch_respects_limit_and_order(session):
     await session.execute(update(OutboxEvent).values(processed_at=utcnow()))
-    events = [await add_event(session, "post.sent_back", {"n": i}) for i in range(55)]
+    events = [await add_event(session, "post.sent_back", {"n": i}) for i in range(BATCH_SIZE + 5)]
     await run(session)
     done = (await session.scalars(
         select(OutboxEvent.id).where(OutboxEvent.processed_at.is_not(None), OutboxEvent.id.in_([e.id for e in events]))
     )).all()
-    assert sorted(done) == [e.id for e in events[:50]]
+    assert sorted(done) == [e.id for e in events[:BATCH_SIZE]]
     left = await session.scalar(select(func.count()).select_from(OutboxEvent).where(OutboxEvent.processed_at.is_(None)))
     assert left == 5
 
@@ -222,3 +226,93 @@ async def test_one_failing_row_does_not_block_others(session):
     await session.refresh(bad)
     await session.refresh(good)
     assert bad.attempts == 1 and good.processed_at is not None
+
+
+async def test_timeout_is_recorded_and_other_events_still_succeed(session):
+    slow = await add_event(session, payload=await post_payload(session))
+    ok = await add_event(session, "post.sent_back")
+
+    def hang(request):
+        raise httpx.ReadTimeout("timed out")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(hang)) as http:
+        await process_outbox(make_ctx(session, http))
+    await session.refresh(slow)
+    await session.refresh(ok)
+    assert slow.attempts == 1 and "ReadTimeout" in slow.last_error and slow.next_attempt_at is not None
+    assert ok.processed_at is not None
+
+
+async def test_db_error_in_one_event_does_not_poison_the_batch(session):
+    good_payload = await post_payload(session)
+    poison = await add_event(session, payload={"post_id": "p", "category_id": "not-an-int", "slugs": {}})
+    good = await add_event(session, payload=good_payload)
+    later = await add_event(session, "post.sent_back")
+    rec = await run(session)
+    for ev in (poison, good, later):
+        await session.refresh(ev)
+    assert poison.attempts == 1 and poison.processed_at is None and poison.last_error
+    assert poison.next_attempt_at is not None and poison.dead_at is None
+    assert good.processed_at is not None and later.processed_at is not None
+    assert len(rec.requests) == 2  # only the good event reached the network
+    rec2 = await run(session)  # the poison row is backing off, not blocking
+    assert rec2.requests == []
+
+
+async def test_leased_row_is_not_reclaimed_until_lease_expires(session):
+    ev = await add_event(session, "post.sent_back")
+    # a claim that crashed before recording: the lease is all that is left on the row
+    ev.next_attempt_at = utcnow() + timedelta(seconds=LEASE_SECONDS)
+    await session.flush()
+    await run(session)
+    await session.refresh(ev)
+    assert ev.processed_at is None
+    ev.next_attempt_at = utcnow() - timedelta(seconds=1)
+    await session.flush()
+    await run(session)
+    await session.refresh(ev)
+    assert ev.processed_at is not None and ev.next_attempt_at is None
+
+
+async def test_claim_takes_a_lease_before_processing(session):
+    ev = await add_event(session, payload=await post_payload(session))
+    seen = {}
+
+    async def peek(request):
+        seen["lease"] = await session.scalar(select(OutboxEvent.next_attempt_at).where(OutboxEvent.id == ev.id))
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(peek)) as http:
+        await process_outbox(make_ctx(session, http))
+    assert seen["lease"] is not None
+    assert timedelta(seconds=LEASE_SECONDS - 5) < seen["lease"] - utcnow() <= timedelta(seconds=LEASE_SECONDS)
+
+
+async def test_old_category_gets_revalidated_too(session):
+    new = await make_category(session, slug="sports")
+    old = await make_category(session, slug="morang")
+    payload = {
+        "post_id": "p1", "category_id": new.id, "old_category_id": old.id, "slugs": {"ne": "x"},
+        "redirects": [{"from": "/ne/morang/x", "to": "/ne/sports/x"}],
+    }
+    await add_event(session, "post.updated", payload)
+    rec = await run(session)
+    assert rec.body(0)["tags"] == ["post:p1", "home", "category:sports", "category:morang", "search"]
+
+
+async def test_empty_secret_with_url_is_skipped_and_processed(session, caplog):
+    ev = await add_event(session, payload=await post_payload(session))
+    with caplog.at_level("ERROR"):
+        rec = await run(session, make_settings(revalidate_secret="", cf_zone_id=None))
+    await session.refresh(ev)
+    assert rec.requests == [] and ev.processed_at is not None
+
+
+async def test_site_url_trailing_slash_and_error_hides_query(session):
+    ev = await add_event(session, payload=await post_payload(session, slugs={"ne": "a"}))
+    rec = await run(session, make_settings(site_url="https://mawapress.com/", revalidate_url=None))
+    assert rec.body(0)["files"] == ["https://mawapress.com/ne/morang/a"]
+    bad = await add_event(session, payload={**ev.payload, "slugs": {"ne": "b"}})
+    await run(session, make_settings(revalidate_url="https://web.test/r?token=SECRET"), status=500)
+    await session.refresh(bad)
+    assert "SECRET" not in bad.last_error and "https://web.test/r" in bad.last_error

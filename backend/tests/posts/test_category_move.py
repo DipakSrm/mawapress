@@ -50,6 +50,7 @@ async def test_editor_moves_a_live_post(client, session, fake_redis):
 
     [event] = (await session.scalars(select(OutboxEvent).where(OutboxEvent.topic == "post.updated"))).all()
     assert event.payload["category_id"] == new_cat.id
+    assert event.payload["old_category_id"] == old_cat.id
     assert event.payload["redirects"] == [{"from": OLD, "to": NEW}]
 
 
