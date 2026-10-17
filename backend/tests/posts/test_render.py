@@ -360,3 +360,17 @@ def test_hostile_html_is_stripped_by_the_real_nh3_config():
     assert 'class="evil"' not in out and "myspace" not in out and "position" not in out
     assert "#fff" in out.replace(" ", "")
     assert "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ" in out
+
+
+def test_non_ascii_digits_are_rejected_in_color_and_font_size():
+    arabic_indic = "١٢"  # \d would match these; the renderer must not
+    devanagari = "१२"
+    for digits in (arabic_indic, devanagari):
+        out = render_html(doc(para(text("x", {"type": "textStyle", "attrs": {"fontSize": f"{digits}px"}}))))
+        assert "font-size" not in out
+        out = render_html(
+            doc(para(text("x", {"type": "textStyle", "attrs": {"color": f"rgb({digits}, 1, 2)"}})))
+        )
+        assert "color" not in out
+    ok = render_html(doc(para(text("x", {"type": "textStyle", "attrs": {"fontSize": "12px", "color": "rgb(1, 2, 3)"}}))))
+    assert "font-size:12px" in ok and "rgb(1, 2, 3)" in ok

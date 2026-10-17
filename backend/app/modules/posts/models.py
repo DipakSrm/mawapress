@@ -26,6 +26,7 @@ from app.db.base import Base, utcnow
 if TYPE_CHECKING:
     from app.modules.media.models import Media
     from app.modules.taxonomy.models import Tag
+    from app.modules.users.models import User
 
 
 class PostStatus(StrEnum):
@@ -71,14 +72,23 @@ class Post(Base):
     schedule_attempts: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     schedule_last_error: Mapped[str | None] = mapped_column(Text)
     schedule_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The editor's note from the latest send-back; kept after publish and unschedule, cleared by a successful submit.
+    feedback_note: Mapped[str | None] = mapped_column(String(1000))
+    feedback_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    feedback_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 
+    feedback_editor: Mapped["User | None"] = relationship(foreign_keys=[feedback_by], lazy="selectin")
     translations: Mapped[list["PostTranslation"]] = relationship(
         back_populates="post", lazy="selectin", cascade="all, delete-orphan", order_by="PostTranslation.id"
     )
     tags: Mapped[list["Tag"]] = relationship(secondary="post_tags", lazy="selectin", order_by="Tag.id")
     featured_media: Mapped["Media | None"] = relationship(lazy="selectin")
+
+    @property
+    def feedback_by_name(self) -> str | None:
+        return self.feedback_editor.name if self.feedback_editor else None
 
 
 class PostTranslation(Base):

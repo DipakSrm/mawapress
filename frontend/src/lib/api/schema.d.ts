@@ -1134,9 +1134,22 @@ export interface components {
             author_id: string;
             /** Category Id */
             category_id: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
             featured_media: components["schemas"]["MediaOut"] | null;
             /** Featured Media Id */
             featured_media_id: string | null;
+            /** Feedback At */
+            feedback_at: string | null;
+            /** Feedback By */
+            feedback_by: string | null;
+            /** Feedback By Name */
+            feedback_by_name: string | null;
+            /** Feedback Note */
+            feedback_note: string | null;
             /**
              * Id
              * Format: uuid
@@ -1181,6 +1194,17 @@ export interface components {
             author_name: string;
             /** Category Id */
             category_id: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Feedback At */
+            feedback_at: string | null;
+            /** Feedback By Name */
+            feedback_by_name: string | null;
+            /** Feedback Note */
+            feedback_note: string | null;
             /**
              * Id
              * Format: uuid

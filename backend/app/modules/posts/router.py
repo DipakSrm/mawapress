@@ -42,9 +42,13 @@ def _summary(post: Post, author_name: str) -> PostSummary:
         author_id=post.author_id,
         author_name=author_name,
         view_count=post.view_count,
+        created_at=post.created_at,
         updated_at=post.updated_at,
         published_at=post.published_at,
         scheduled_at=post.scheduled_at,
+        feedback_note=post.feedback_note,
+        feedback_by_name=post.feedback_by_name,
+        feedback_at=post.feedback_at,
         translations=[TranslationSummary.model_validate(t) for t in post.translations],
     )
 

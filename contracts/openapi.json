@@ -988,6 +988,11 @@
             "title": "Category Id",
             "type": "integer"
           },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
           "featured_media": {
             "anyOf": [
               {
@@ -1009,6 +1014,52 @@
               }
             ],
             "title": "Featured Media Id"
+          },
+          "feedback_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback At"
+          },
+          "feedback_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback By"
+          },
+          "feedback_by_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback By Name"
+          },
+          "feedback_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback Note"
           },
           "id": {
             "format": "uuid",
@@ -1098,6 +1149,11 @@
           "scheduled_at",
           "schedule_attempts",
           "schedule_last_error",
+          "feedback_note",
+          "feedback_by",
+          "feedback_by_name",
+          "feedback_at",
+          "created_at",
           "updated_at",
           "translations",
           "tags"
@@ -1130,6 +1186,45 @@
           "category_id": {
             "title": "Category Id",
             "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "feedback_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback At"
+          },
+          "feedback_by_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback By Name"
+          },
+          "feedback_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback Note"
           },
           "id": {
             "format": "uuid",
@@ -1187,9 +1282,13 @@
           "author_id",
           "author_name",
           "view_count",
+          "created_at",
           "updated_at",
           "published_at",
           "scheduled_at",
+          "feedback_note",
+          "feedback_by_name",
+          "feedback_at",
           "translations"
         ],
         "title": "PostSummary",

@@ -6,8 +6,8 @@ from urllib.parse import SplitResult, parse_qs, urlsplit
 
 import nh3
 
-_COLOR = re.compile(r"(#[0-9a-fA-F]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\))")
-_FONT_SIZE = re.compile(r"\d{1,2}(px|pt)")
+_COLOR = re.compile(r"(#[0-9a-fA-F]{3,8}|rgb\(\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*,\s*[0-9]{1,3}\s*\))")
+_FONT_SIZE = re.compile(r"[0-9]{1,2}(px|pt)")
 FONTS = {"Mukta", "Noto Sans Devanagari", "Inter"}
 LINE_HEIGHTS = {"1", "1.0", "1.15", "1.5", "2", "2.0"}
 ALIGNS = {"center", "right", "justify"}
