@@ -1,0 +1,240 @@
+/*
+ * Article body typography. Shared by the admin editor (.editor-content) and, from M4, the public article page,
+ * so what the newsroom sees while writing is what readers get. Tailwind's preflight resets lists, headings and
+ * tables, so everything is restated here.
+ */
+
+.article-body {
+  font-size: 1.0625rem;
+  line-height: 1.7; /* roomy enough for Devanagari matras above and below the line */
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.article-body:lang(ne) {
+  font-family: var(--font-mukta), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.85;
+}
+
+.article-body:lang(en) {
+  font-family: var(--font-inter), var(--font-mukta), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* The renderer and the editor store plain family names; map them to the loaded web fonts. */
+.article-body [style*="Mukta"] {
+  font-family: var(--font-mukta), ui-sans-serif, system-ui, sans-serif !important;
+}
+.article-body [style*="Noto Sans Devanagari"] {
+  font-family:
+    var(--font-noto-devanagari), var(--font-mukta), ui-sans-serif, system-ui, sans-serif !important;
+}
+.article-body [style*="Inter"] {
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif !important;
+}
+
+.article-body > * + * {
+  margin-top: 1rem;
+}
+
+.article-body h1,
+.article-body h2,
+.article-body h3,
+.article-body h4 {
+  font-weight: 700;
+  line-height: 1.35;
+  margin-top: 1.75rem;
+}
+.article-body h1 {
+  font-size: 2rem;
+}
+.article-body h2 {
+  font-size: 1.625rem;
+}
+.article-body h3 {
+  font-size: 1.3125rem;
+}
+.article-body h4 {
+  font-size: 1.125rem;
+}
+
+.article-body a {
+  color: var(--brand-blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.article-body strong {
+  font-weight: 700;
+}
+.article-body em {
+  font-style: italic;
+}
+.article-body u {
+  text-decoration: underline;
+}
+.article-body s {
+  text-decoration: line-through;
+}
+.article-body mark {
+  border-radius: 0.2em;
+  padding: 0 0.1em;
+  color: inherit;
+}
+
+.article-body ul,
+.article-body ol {
+  padding-left: 1.5rem;
+}
+.article-body ul {
+  list-style: disc;
+}
+.article-body ol {
+  list-style: decimal;
+}
+.article-body li > p {
+  margin: 0;
+}
+.article-body li + li {
+  margin-top: 0.25rem;
+}
+
+.article-body blockquote:not(.embed) {
+  border-left: 4px solid var(--brand-red);
+  padding-left: 1rem;
+  font-style: italic;
+  color: var(--muted-foreground);
+}
+
+.article-body hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 1.75rem 0;
+}
+
+.article-body img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin-inline: auto;
+  border-radius: 0.5rem;
+}
+.article-body figure {
+  margin-block: 1.5rem;
+}
+.article-body figcaption,
+.article-body .figcaption-input {
+  display: block;
+  margin-top: 0.5rem;
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+/* Tables */
+.article-body .table-wrap {
+  overflow-x: auto;
+}
+.article-body table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.95em;
+}
+.article-body th,
+.article-body td {
+  position: relative;
+  min-width: 4rem;
+  border: 1px solid var(--border);
+  padding: 0.4rem 0.6rem;
+  vertical-align: top;
+  text-align: left;
+}
+.article-body th {
+  background: var(--muted);
+  font-weight: 700;
+}
+.article-body td > p,
+.article-body th > p {
+  margin: 0;
+}
+
+/* Responsive video and social-post placeholders */
+.article-body .video-embed {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  background: #000;
+}
+.article-body .video-embed iframe,
+.article-body [data-youtube-video] iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.article-body [data-youtube-video] {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  background: #000;
+}
+.article-body blockquote.embed,
+.article-body .embed-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  border: 1px dashed var(--border);
+  border-radius: 0.5rem;
+  background: var(--muted);
+  padding: 0.75rem 1rem;
+  font-style: normal;
+  font-size: 0.9rem;
+}
+.article-body .embed-card-provider {
+  font-weight: 600;
+}
+.article-body .embed-card-url {
+  color: var(--muted-foreground);
+  word-break: break-all;
+}
+
+/* Editor-only affordances */
+.editor-content.ProseMirror {
+  min-height: 16rem;
+  outline: none;
+}
+.editor-content p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--muted-foreground);
+}
+.editor-content .ProseMirror-selectednode,
+.editor-content figure.is-selected img {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.editor-content .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: color-mix(in oklab, var(--brand-blue) 18%, transparent);
+}
+.editor-content .figcaption-input {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  outline: none;
+}
+.editor-content .figcaption-input:focus {
+  border-bottom: 1px solid var(--ring);
+}
+.editor-content a {
+  cursor: text;
+}
