@@ -20,13 +20,13 @@ dependencies = [
   "boto3>=1.43.114",
   "python-multipart>=0.0.32",
   "mammoth>=1.13.0",
+  "httpx>=0.28",
 ]
 
 [dependency-groups]
 dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
-  "httpx>=0.28",
   "testcontainers[postgres]>=4.8",
   "fakeredis>=2.26",
   "ruff>=0.8",

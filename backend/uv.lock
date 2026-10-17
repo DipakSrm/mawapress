@@ -988,6 +988,7 @@ dependencies = [
     { name = "boto3" },
     { name = "email-validator" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "mammoth" },
     { name = "nh3" },
     { name = "pillow" },
@@ -1003,7 +1004,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "fakeredis" },
-    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "python-docx" },
@@ -1020,6 +1020,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.43.114" },
     { name = "email-validator", specifier = ">=2.2" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "mammoth", specifier = ">=1.13.0" },
     { name = "nh3", specifier = ">=0.2.18" },
     { name = "pillow", specifier = ">=13.0.0" },
@@ -1035,7 +1036,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "fakeredis", specifier = ">=2.26" },
-    { name = "httpx", specifier = ">=0.28" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "python-docx", specifier = ">=1.2.0" },
