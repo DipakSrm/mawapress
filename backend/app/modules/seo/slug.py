@@ -84,3 +84,11 @@ def make_slug(text: str, max_len: int = 80) -> str:
         cut = slug[:max_len]
         slug = cut.rsplit("-", 1)[0] if "-" in cut else cut
     return slug or "post"
+
+
+SLUG_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def is_valid_slug(slug: str, max_len: int = 80) -> bool:
+    """True when slug looks like make_slug output: lower-case kebab-case ASCII, <= max_len."""
+    return len(slug) <= max_len and SLUG_PATTERN.fullmatch(slug) is not None

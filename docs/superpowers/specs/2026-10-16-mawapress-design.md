@@ -105,7 +105,11 @@ Each module is a package under `backend/app/modules/<name>/` containing `router.
 | Users and roles | | | ✔ |
 
 ### Post workflow
-`draft → in_review → scheduled | published → archived`. Every save of a published post creates a `post_revisions` row. When a post is published, the backend writes a transactional outbox row. The worker reads it, calls the Next.js `revalidateTag` webhook (tags: `post:{id}`, `home`, `category:{slug}`) and purges the matching URLs from Cloudflare.
+`draft → in_review → scheduled | published → archived`.
+
+**Per-language publishing (decided 2026-10-16).** Each translation also has its own `status` (`draft | published`) and `published_at`. A post is public in a locale only when the post is published **and** that translation is published. Publishing a post publishes the translations that exist at that moment; a translation added later to a live post stays a draft until an editor publishes it (`POST /posts/{id}/translations/{locale}/publish`), so autosaved half-translations never appear. hreflang and `alternates` list only published translations.
+
+Every save of a published post creates a `post_revisions` row. When a post is published, the backend writes a transactional outbox row. The worker reads it, calls the Next.js `revalidateTag` webhook (tags: `post:{id}`, `home`, `category:{slug}`) and purges the matching URLs from Cloudflare.
 
 ---
 
@@ -124,6 +128,7 @@ post_translations(id pk, post_id fk, locale enum('ne','en'),
       title, slug, excerpt, content_json jsonb, content_html text,
       seo_title null, seo_description null, og_media_id null,   -- manual overrides
       seo_auto jsonb,                                            -- generated values
+      status enum('draft','published') default 'draft', published_at null,  -- per-language visibility
       search_vector tsvector GENERATED,
       unique(locale, slug), unique(post_id, locale))
       idx: GIN(search_vector), GIN(title gin_trgm_ops)

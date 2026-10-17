@@ -1,9 +1,16 @@
+from datetime import timedelta
+
+import jwt
 from fastapi import Depends
 from httpx import ASGITransport, AsyncClient
 
+from app.core.config import get_settings
+from app.db.base import utcnow
 from app.db.session import get_session
 from app.main import create_app
+from app.modules.auth import router as auth_router
 from app.modules.auth.deps import require_role
+from app.modules.auth.security import ALGORITHM, DUMMY_PASSWORD_HASH
 from app.modules.users.models import Role, User
 from tests.factories import auth_header, make_user
 
@@ -53,3 +60,64 @@ async def test_require_role_blocks_lower_roles(session):
         assert denied.json()["error"]["code"] == "FORBIDDEN_ROLE"
         assert (await c.get("/editor-only", headers=auth_header(editor))).status_code == 200
         assert (await c.get("/editor-only", headers=auth_header(admin))).status_code == 200
+
+
+def forged(claims: dict, secret: str | None = None) -> dict[str, str]:
+    token = jwt.encode(claims, secret or get_settings().jwt_secret, algorithm=ALGORITHM)
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def assert_invalid_token(client, headers):
+    r = await client.get("/api/auth/me", headers=headers)
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "INVALID_TOKEN"
+
+
+async def test_expired_token_is_401(client, session):
+    user = await make_user(session)
+    past = utcnow() - timedelta(hours=1)
+    await assert_invalid_token(client, forged({"sub": str(user.id), "iat": past, "exp": past + timedelta(minutes=15)}))
+
+
+async def test_wrong_signature_is_401(client, session):
+    user = await make_user(session)
+    now = utcnow()
+    claims = {"sub": str(user.id), "iat": now, "exp": now + timedelta(minutes=15)}
+    await assert_invalid_token(client, forged(claims, secret="another-secret-that-is-at-least-32-chars"))
+
+
+async def test_deactivated_user_with_valid_token_is_401(client, session):
+    user = await make_user(session, is_active=False)
+    await assert_invalid_token(client, auth_header(user))
+
+
+async def test_token_missing_required_claims_is_401(client, session):
+    user = await make_user(session)
+    now = utcnow()
+    full = {"sub": str(user.id), "iat": now, "exp": now + timedelta(minutes=15)}
+    for missing in ("exp", "sub", "iat"):
+        claims = {k: v for k, v in full.items() if k != missing}
+        await assert_invalid_token(client, forged(claims))
+
+
+async def test_non_string_or_malformed_sub_is_401_not_500(client, session):
+    now = utcnow()
+    for sub in (12345, ["x"], "not-a-uuid"):
+        await assert_invalid_token(client, forged({"sub": sub, "iat": now, "exp": now + timedelta(minutes=15)}))
+
+
+async def test_login_runs_password_hash_even_for_unknown_or_inactive_user(client, session, monkeypatch):
+    await make_user(session, email="off2@mawapress.com", password="right-pass-1", is_active=False)
+    seen: list[str] = []
+    real_verify = auth_router.verify_password
+
+    def spy(password: str, password_hash: str) -> bool:
+        seen.append(password_hash)
+        return real_verify(password, password_hash)
+
+    monkeypatch.setattr(auth_router, "verify_password", spy)
+    for email in ("ghost2@mawapress.com", "off2@mawapress.com"):
+        r = await client.post("/api/auth/login", json={"email": email, "password": "right-pass-1"})
+        assert r.status_code == 401
+        assert r.json()["error"]["code"] == "INVALID_CREDENTIALS"
+    assert seen == [DUMMY_PASSWORD_HASH, DUMMY_PASSWORD_HASH]

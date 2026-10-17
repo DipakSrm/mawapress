@@ -86,3 +86,31 @@ def test_json_ld_news_article_and_breadcrumb():
     assert crumbs["@type"] == "BreadcrumbList"
     assert len(crumbs["itemListElement"]) == 3
     json.dumps(meta.to_dict())  # must be JSON-serialisable
+
+
+def test_missing_published_at_falls_back_to_modified_at():
+    later = datetime(2026, 10, 17, 9, 0, tzinfo=UTC)
+    article = build_seo(make_input(published_at=None, modified_at=later), SITE).json_ld[0]
+    assert article["datePublished"] == later.isoformat()
+    assert article["dateModified"] == later.isoformat()
+
+
+def test_english_primary_hreflang_keeps_x_default_on_nepali():
+    meta = build_seo(
+        make_input(locale="en", title="Heavy rain in Biratnagar", slug="heavy-rain-in-biratnagar",
+                   category_name="Morang", alternate_slugs={"ne": "biratnagarma-bhari-barsha"}),
+        SITE,
+    )
+    assert meta.canonical == f"{SITE}/en/morang/heavy-rain-in-biratnagar"
+    assert meta.hreflang == {
+        "en": f"{SITE}/en/morang/heavy-rain-in-biratnagar",
+        "ne": f"{SITE}/ne/morang/biratnagarma-bhari-barsha",
+        "x-default": f"{SITE}/ne/morang/biratnagarma-bhari-barsha",
+    }
+    assert meta.json_ld[0]["inLanguage"] == "en"
+
+
+def test_seo_title_passes_through_verbatim():
+    custom = "Election results 2082: every Morang constituency, live and updated through the night"
+    meta = build_seo(make_input(locale="en", seo_title=custom), SITE)
+    assert meta.title == custom  # no truncation and no brand suffix

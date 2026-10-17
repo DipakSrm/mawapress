@@ -10,6 +10,12 @@ from app.db.base import utcnow
 
 _hasher = PasswordHasher()
 ALGORITHM = "HS256"
+REQUIRED_CLAIMS = ["exp", "sub", "iat"]
+
+# Verified against when the email is unknown or the user is inactive, so a failed
+# login costs one argon2 verify either way and response time does not leak which
+# emails exist.
+DUMMY_PASSWORD_HASH = _hasher.hash("mawapress-timing-equaliser")
 
 
 def hash_password(password: str) -> str:
@@ -31,4 +37,11 @@ def create_access_token(user_id: uuid.UUID, role: str) -> str:
 
 
 def decode_access_token(token: str) -> dict:
-    return jwt.decode(token, get_settings().jwt_secret, algorithms=[ALGORITHM])
+    """Decode and validate. Raises jwt.PyJWTError on any problem, including a missing
+    exp/sub/iat claim or a non-string sub (PyJWT >= 2.10 validates sub's type)."""
+    return jwt.decode(
+        token,
+        get_settings().jwt_secret,
+        algorithms=[ALGORITHM],
+        options={"require": REQUIRED_CLAIMS},
+    )

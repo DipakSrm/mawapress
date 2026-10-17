@@ -1,3 +1,5 @@
+from html.parser import HTMLParser
+
 from app.modules.posts.render import render_html
 
 
@@ -109,3 +111,43 @@ def test_boolean_heading_level_defaults_to_h2():
 
 def test_line_height_two_point_zero_allowed():
     assert "2.0" in render_html(doc(para(text("x"), lineHeight="2.0")))
+
+
+class _StartTags(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.tags: list[tuple[str, dict[str, str | None]]] = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, dict(attrs)))
+
+
+def start_tags(markup: str) -> list[tuple[str, dict[str, str | None]]]:
+    parser = _StartTags()
+    parser.feed(markup)
+    parser.close()
+    return parser.tags
+
+
+def test_quote_in_alt_cannot_break_out_of_attribute():
+    hostile = '" onerror="alert(1)'
+    out = render_html(doc({"type": "image", "attrs": {"src": "https://cdn.mawapress.com/a.webp", "alt": hostile}}))
+    img = next(attrs for tag, attrs in start_tags(out) if tag == "img")
+    assert set(img) == {"src", "alt", "loading"}
+    assert img["alt"] == hostile  # survives as text, inside the attribute
+
+
+def test_quote_in_href_cannot_add_attributes():
+    hostile = 'https://mawapress.com/" onclick="alert(1)'
+    out = render_html(doc(para(text("x", {"type": "link", "attrs": {"href": hostile}}))))
+    link = next(attrs for tag, attrs in start_tags(out) if tag == "a")
+    assert set(link) == {"href", "target", "rel"}
+    assert link["href"] == hostile
+
+
+def test_markup_in_caption_stays_text():
+    hostile = "</figcaption><script>alert(1)</script>"
+    out = render_html(doc({"type": "image", "attrs": {"src": "https://cdn.mawapress.com/a.webp", "caption": hostile}}))
+    assert [tag for tag, _ in start_tags(out)] == ["figure", "img", "figcaption"]
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out

@@ -2,8 +2,9 @@
 
 from app.db.base import Base
 from app.db.outbox import OutboxEvent
-from app.modules.posts.models import Post, PostTranslation
-from app.modules.taxonomy.models import Category
+from app.modules.posts.models import Post, PostRevision, PostTranslation
+from app.modules.seo.models import Redirect
+from app.modules.taxonomy.models import Category, Tag, post_tags
 from app.modules.users.models import User
 
-__all__ = ["Base", "Category", "OutboxEvent", "Post", "PostTranslation", "User"]
+__all__ = ["Base", "Category", "OutboxEvent", "Post", "PostRevision", "PostTranslation", "Redirect", "Tag", "User", "post_tags"]

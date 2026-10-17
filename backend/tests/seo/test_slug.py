@@ -45,3 +45,14 @@ def test_halant_joins_consonants():
 
 def test_single_consonant_word_keeps_vowel():
     assert transliterate("र") == "ra"
+
+
+from app.modules.seo.slug import is_valid_slug  # noqa: E402
+
+
+def test_is_valid_slug():
+    assert is_valid_slug("local-news")
+    assert is_valid_slug("province-1")
+    assert is_valid_slug("a" * 80)
+    for bad in ("", "Local", "bad--slug", "-lead", "trail-", "with space", "नेपाल", "a" * 81, "snake_case"):
+        assert not is_valid_slug(bad), bad

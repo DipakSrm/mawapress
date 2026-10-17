@@ -38,3 +38,19 @@ async def test_unhandled_exception_uses_envelope():
         r = await c.get("/crash")
     assert r.status_code == 500
     assert r.json() == {"error": {"code": "INTERNAL_ERROR", "message": "Internal server error", "details": {}}}
+
+
+async def test_integrity_error_is_a_409_conflict_not_a_500():
+    from sqlalchemy.exc import IntegrityError
+
+    app = create_app()
+
+    @app.get("/race")
+    async def race():
+        raise IntegrityError("INSERT ...", {}, Exception("duplicate key value violates unique constraint"))
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.get("/race")
+    assert r.status_code == 409
+    assert r.json() == {"error": {"code": "CONFLICT", "message": "The request conflicts with current data", "details": {}}}

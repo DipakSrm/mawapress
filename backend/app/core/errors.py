@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,12 @@ def register_error_handlers(app: FastAPI) -> None:
     async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         return _envelope(exc.status_code, _http_code(exc.status_code), str(exc.detail), {},
                          headers=getattr(exc, "headers", None))
+
+    @app.exception_handler(IntegrityError)
+    async def handle_integrity_error(request: Request, exc: IntegrityError) -> JSONResponse:
+        # A constraint lost a race the service could not name (specific cases are mapped earlier).
+        logger.warning("Database constraint conflict on %s %s", request.method, request.url.path, exc_info=exc)
+        return _envelope(409, "CONFLICT", "The request conflicts with current data", {})
 
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
