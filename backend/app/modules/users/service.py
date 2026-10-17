@@ -52,9 +52,28 @@ async def create_user(session: AsyncSession, data: UserCreate) -> User:
 
 
 async def update_user(session: AsyncSession, actor: User, user_id: uuid.UUID, data: UserUpdate) -> User:
+    changes_admin_standing = data.role is not None or data.is_active is not None
+    active_admin_ids: list[uuid.UUID] = []
+    if changes_admin_standing:
+        # Lock every active admin row, always in id order, before touching the target. Two admins
+        # demoting each other then serialise here instead of both seeing "another admin remains".
+        active_admin_ids = list((await session.scalars(
+            select(User.id)
+            .where(User.role == Role.admin, User.is_active.is_(True))
+            .order_by(User.id)
+            .with_for_update()
+        )).all())
     user = await get_user(session, user_id)
+    if changes_admin_standing:
+        await session.refresh(user)  # re-read under the lock: role/is_active may have just changed
     if user.id == actor.id and (data.is_active is False or (data.role is not None and data.role != Role.admin)):
         raise AppError(409, "CANNOT_MODIFY_SELF", "Admins cannot deactivate or demote themselves")
+    loses_admin = (
+        user.role == Role.admin and user.is_active
+        and (data.is_active is False or (data.role is not None and data.role != Role.admin))
+    )
+    if loses_admin and not any(admin_id != user.id for admin_id in active_admin_ids):
+        raise AppError(409, "LAST_ADMIN", "At least one active admin must remain")
     revoke = (data.role is not None and data.role != user.role) or (data.is_active is False and user.is_active)
     if data.name is not None:
         user.name = data.name
@@ -76,9 +95,13 @@ async def set_password(session: AsyncSession, user_id: uuid.UUID, password: str)
 
 
 async def update_me(session: AsyncSession, user: User, data: MeUpdate) -> User:
+    if data.current_password is not None and data.new_password is None:
+        raise AppError(422, "NEW_PASSWORD_REQUIRED", "new_password is required when current_password is given")
     if data.new_password is not None:
         if data.current_password is None or not verify_password(data.current_password, user.password_hash):
             raise AppError(403, "INVALID_CURRENT_PASSWORD", "Current password is incorrect")
+        if data.new_password == data.current_password:
+            raise AppError(422, "PASSWORD_UNCHANGED", "New password must differ from the current one")
         user.password_hash = hash_password(data.new_password)
         await revoke_user_sessions(session, user)
     if data.name is not None:

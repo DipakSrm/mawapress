@@ -54,3 +54,22 @@ async def test_me_cannot_change_role_or_use_short_password(client, session):
 
 async def test_me_update_requires_login(client):
     assert (await client.patch("/api/auth/me", json={"name": "x"})).status_code == 401
+
+
+async def test_current_password_alone_is_422_new_password_required(client, session):
+    user = await make_user(session, password="first-password-1")
+    r = await client.patch("/api/auth/me", json={"current_password": "first-password-1"}, headers=auth_header(user))
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "NEW_PASSWORD_REQUIRED"
+
+
+async def test_new_password_equal_to_current_is_422_password_unchanged(client, session):
+    user = await make_user(session, password="first-password-1")
+    r = await client.patch(
+        "/api/auth/me",
+        json={"current_password": "first-password-1", "new_password": "first-password-1"},
+        headers=auth_header(user),
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "PASSWORD_UNCHANGED"
+    assert user.token_version == 0  # nothing was revoked
