@@ -87,7 +87,7 @@ async rewrites() {
 
 ## Client IP: stats and search
 
-`POST /api/public/stats/view` and `GET /api/public/search` are rate limited per client IP, and view counting is de-duplicated per IP. Call both **from the visitor's browser**, so the API sees the visitor. If the Next.js server calls them instead, it must forward the visitor's `CF-Connecting-IP` header (the API honours it when `MAWA_TRUST_PROXY=true`); otherwise every visitor shares the server's IP and gets throttled and under-counted. Never call these during server rendering or ISR.
+`POST /api/public/stats/view` and `GET /api/public/search` are rate limited per client IP, and view counting is de-duplicated per IP. Call both **from the visitor's browser**, so the API sees the visitor. If the Next.js server calls them instead, it must forward the visitor's `CF-Connecting-IP` header (the API honours it when `MAWA_TRUST_PROXY=true`; Nginx must set it from `$remote_addr`, or use `MAWA_CLIENT_IP_HEADER=X-Real-IP` without Cloudflare, so it cannot be spoofed); otherwise every visitor shares the server's IP and gets throttled and under-counted. Never call these during server rendering or ISR.
 
 ## Public endpoints
 

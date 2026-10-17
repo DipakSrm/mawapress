@@ -92,11 +92,15 @@ real_ip_recursive on;
 location /api/ {
     proxy_pass http://127.0.0.1:8000;
     proxy_set_header Host $host;
-    proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;   # must reach the API
+    proxy_set_header CF-Connecting-IP $remote_addr;             # always overwritten from the real_ip-resolved address
     proxy_set_header X-Forwarded-For $remote_addr;              # overwrite, never append client input
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
+
+`$remote_addr` is the true visitor for Cloudflare-sourced requests (after `real_ip`) and the real peer for direct requests, so a direct-to-origin client cannot spoof `CF-Connecting-IP`.
+
+Nginx without Cloudflare: either set `MAWA_CLIENT_IP_HEADER=X-Real-IP` and have Nginx send `proxy_set_header X-Real-IP $remote_addr;`, or keep the default header but make Nginx overwrite or strip any client-supplied `CF-Connecting-IP`.
 
 Block direct access to the origin from anywhere but Cloudflare (firewall or Cloudflare Authenticated Origin Pulls). Without a proxy, leave `MAWA_TRUST_PROXY=false`.
 
