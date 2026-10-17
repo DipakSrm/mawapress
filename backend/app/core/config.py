@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     jwt_secret: str = DEFAULT_JWT_SECRET
     jwt_access_minutes: int = 15
     site_url: str = "https://mawapress.com"
+    refresh_days: int = 14
+    cookie_secure: bool = True  # set MAWA_COOKIE_SECURE=false for plain-http local dev
+    trust_proxy: bool = False  # honour X-Forwarded-For (only behind a proxy that sets it)
+    rate_limit_window_seconds: int = 60
 
     @model_validator(mode="after")
     def _require_strong_secret_outside_dev(self) -> "Settings":

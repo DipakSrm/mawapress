@@ -56,7 +56,7 @@ async def make_tag(session: AsyncSession, slug: str = "flood", name_ne: str = "à
 
 
 def auth_header(user: User) -> dict[str, str]:
-    return {"Authorization": f"Bearer {create_access_token(user.id, user.role.value)}"}
+    return {"Authorization": f"Bearer {create_access_token(user.id, user.role.value, user.token_version)}"}
 
 
 def auth_if_match(user: User, updated_at: str) -> dict[str, str]:

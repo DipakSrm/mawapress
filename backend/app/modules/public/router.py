@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import get_redis
 from app.core.errors import AppError
+from app.core.ratelimit import limit_search
 from app.db.session import get_session
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
 from app.modules.public.service import (
@@ -187,6 +188,7 @@ async def public_search(
     limit: int = Query(default=20, ge=1, le=50),
     offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
     session: AsyncSession = Depends(get_session),
+    _: None = Depends(limit_search),
 ) -> CardPage:
     _require_locale(locale)
     q = q.strip()

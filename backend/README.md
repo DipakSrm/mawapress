@@ -51,3 +51,10 @@ Docker must be running. The suite includes migration upgrade, downgrade and mode
 ## Configuration
 
 All settings are read from `MAWA_*` environment variables or `.env`; see `.env.example`. Outside `dev`, `MAWA_JWT_SECRET` must be at least 32 random characters or the app refuses to start.
+
+Session and rate-limit settings:
+
+- `MAWA_REFRESH_DAYS` (default `14`): lifetime of the refresh-token cookie.
+- `MAWA_COOKIE_SECURE` (default `true`): sets the `Secure` flag on auth cookies. Set it to `false` for plain-http local development; the shipped `.env.example` does this.
+- `MAWA_TRUST_PROXY` (default `false`): use the first `X-Forwarded-For` entry as the client IP for rate limiting. Enable only behind a proxy that sets the header.
+- `MAWA_RATE_LIMIT_WINDOW_SECONDS` (default `60`): window for the login (5 per IP+email, 20 per IP) and public search (30 per IP) limits.

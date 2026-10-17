@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import pytest_asyncio
 from fakeredis import FakeAsyncRedis
@@ -5,6 +7,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
+
+os.environ.setdefault("MAWA_COOKIE_SECURE", "false")  # the test client talks plain http
 
 from app.core.cache import get_redis
 from app.db.models import Base

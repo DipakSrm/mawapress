@@ -11,12 +11,15 @@ logger = logging.getLogger(__name__)
 
 
 class AppError(Exception):
-    def __init__(self, status: int, code: str, message: str, details: dict | None = None):
+    def __init__(
+        self, status: int, code: str, message: str, details: dict | None = None, headers: dict | None = None
+    ):
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
         self.details = details or {}
+        self.headers = headers
 
 
 def _envelope(status: int, code: str, message: str, details: dict, headers: dict | None = None) -> JSONResponse:
@@ -34,7 +37,7 @@ def _http_code(status: int) -> str:
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
-        return _envelope(exc.status, exc.code, exc.message, exc.details)
+        return _envelope(exc.status, exc.code, exc.message, exc.details, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:

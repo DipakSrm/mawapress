@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from app.modules.auth.service import revoke_user_sessions
 from app.modules.auth.security import hash_password, verify_password
 from app.modules.users.models import Role, User
 from app.modules.users.schemas import MeUpdate, UserCreate, UserUpdate
@@ -54,12 +55,15 @@ async def update_user(session: AsyncSession, actor: User, user_id: uuid.UUID, da
     user = await get_user(session, user_id)
     if user.id == actor.id and (data.is_active is False or (data.role is not None and data.role != Role.admin)):
         raise AppError(409, "CANNOT_MODIFY_SELF", "Admins cannot deactivate or demote themselves")
+    revoke = (data.role is not None and data.role != user.role) or (data.is_active is False and user.is_active)
     if data.name is not None:
         user.name = data.name
     if data.role is not None:
         user.role = data.role
     if data.is_active is not None:
         user.is_active = data.is_active
+    if revoke:
+        await revoke_user_sessions(session, user)
     await session.commit()
     return user
 
@@ -67,6 +71,7 @@ async def update_user(session: AsyncSession, actor: User, user_id: uuid.UUID, da
 async def set_password(session: AsyncSession, user_id: uuid.UUID, password: str) -> None:
     user = await get_user(session, user_id)
     user.password_hash = hash_password(password)
+    await revoke_user_sessions(session, user)
     await session.commit()
 
 
@@ -75,6 +80,7 @@ async def update_me(session: AsyncSession, user: User, data: MeUpdate) -> User:
         if data.current_password is None or not verify_password(data.current_password, user.password_hash):
             raise AppError(403, "INVALID_CURRENT_PASSWORD", "Current password is incorrect")
         user.password_hash = hash_password(data.new_password)
+        await revoke_user_sessions(session, user)
     if data.name is not None:
         user.name = data.name
     if "bio" in data.model_fields_set:

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, String, Text, Uuid, func, true
+from sqlalchemy import DateTime, Enum, String, Text, Uuid, func, text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, utcnow
@@ -24,4 +24,5 @@ class User(Base):
     role: Mapped[Role] = mapped_column(Enum(Role, name="user_role"))
     is_active: Mapped[bool] = mapped_column(default=True, server_default=true())
     bio: Mapped[str | None] = mapped_column(Text)
+    token_version: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
