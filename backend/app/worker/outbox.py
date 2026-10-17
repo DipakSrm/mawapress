@@ -8,12 +8,14 @@ expires; a crashed or cancelled run simply lets the lease lapse and the row is r
 
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from urllib.parse import urlsplit
 
 import httpx
+from redis.exceptions import RedisError
 from sqlalchemy import or_, select, update
 
 from app.core.config import Settings
@@ -28,8 +30,10 @@ BATCH_SIZE = 20
 LEASE_SECONDS = 120
 PROCESS_BUDGET_SECONDS = 90  # stop starting new events after this; keep the cron timeout between this and the lease
 CRON_TIMEOUT_SECONDS = 110
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 10
 BACKOFF_BASE_SECONDS = 10
+BACKOFF_MAX_SECONDS = 3600
+OUTBOX_LOCK_KEY = "lock:outbox"
 ERROR_MAX_LEN = 500
 CF_PURGE_BATCH = 30
 CF_PURGE_URL = "https://api.cloudflare.com/client/v4/zones/{zone}/purge_cache"
@@ -42,7 +46,8 @@ SessionFactory = Callable[[], object]
 class Targets:
     post_id: str
     tags: list[str]
-    paths: list[str]
+    paths: list[str]  # article and redirect paths: what the web app revalidates
+    purge_paths: list[str]  # paths plus the listing pages, sitemaps and feeds the change touches: what the CDN purges
 
 
 Handler = Callable[[httpx.AsyncClient, Settings, Targets], Awaitable[None]]
@@ -69,13 +74,21 @@ async def resolve_targets(session, payload: dict) -> Targets:
     old = await session.get(Category, old_id) if old_id is not None else None
     if old is not None:
         tags.append(f"category:{old.slug}")
+    category_slugs = [c.slug for c in (category, old) if c is not None]
     tags += ["search", "feeds"]  # feeds: sitemaps and RSS, which the web app proxies
     redirects = list(payload.get("redirects") or [])
     if payload.get("redirect"):
         redirects.append(payload["redirect"])
     for r in redirects:
         paths += [r["from"], r["to"]]
-    return Targets(str(payload["post_id"]), _unique(tags), _unique(paths))
+    paths = _unique(paths)
+    locales = sorted(payload.get("slugs") or {})
+    listings = ["/", *(f"/{loc}" for loc in locales)]
+    for loc in locales:
+        for slug in category_slugs:
+            listings += [f"/{loc}/{slug}", f"/{loc}/{slug}/rss.xml"]
+    listings += ["/sitemap.xml", "/news-sitemap.xml", "/rss.xml"]
+    return Targets(str(payload["post_id"]), _unique(tags), paths, _unique([*paths, *listings]))
 
 
 _warned_empty_secret = False
@@ -102,7 +115,7 @@ async def purge_cdn(http: httpx.AsyncClient, settings: Settings, targets: Target
     if not (settings.cf_zone_id and settings.cf_api_token):
         return
     base = settings.site_url.rstrip("/")
-    urls = [base + p for p in targets.paths]
+    urls = [base + p for p in targets.purge_paths]
     for i in range(0, len(urls), CF_PURGE_BATCH):
         resp = await http.post(
             CF_PURGE_URL.format(zone=settings.cf_zone_id),
@@ -198,12 +211,49 @@ async def _record_failure(factory: SessionFactory, event_id: int, exc: Exception
             event.next_attempt_at = None
             log.error("outbox event %s dead-lettered: %s", event_id, event.last_error)
         else:
-            event.next_attempt_at = utcnow() + timedelta(seconds=BACKOFF_BASE_SECONDS * 2**event.attempts)
+            event.next_attempt_at = utcnow() + timedelta(
+                seconds=min(BACKOFF_BASE_SECONDS * 2**event.attempts, BACKOFF_MAX_SECONDS)
+            )
         await session.commit()
 
 
+async def _acquire_lock(redis) -> str | None:
+    """Take the run lock (SET NX PX = lease). Returns our token, or None when a previous run still holds it.
+    Redis trouble is not a reason to stop: the row leases already make overlapping runs safe."""
+    token = uuid.uuid4().hex
+    try:
+        if await redis.set(OUTBOX_LOCK_KEY, token, nx=True, px=LEASE_SECONDS * 1000):
+            return token
+        return None
+    except RedisError:
+        log.warning("outbox lock unavailable; relying on row leases", exc_info=True)
+        return ""
+
+
+async def _release_lock(redis, token: str) -> None:
+    try:
+        if await redis.get(OUTBOX_LOCK_KEY) == token:  # never drop a lock a later run took after ours expired
+            await redis.delete(OUTBOX_LOCK_KEY)
+    except RedisError:
+        log.warning("could not release the outbox lock; it expires with its lease", exc_info=True)
+
+
 async def process_outbox(ctx: dict) -> int:
-    """Cron entry point (every 10 s). ctx carries `session_factory`, `http` and `settings`."""
+    """Cron entry point (every 10 s). ctx carries `session_factory`, `http`, `settings` and `cache_redis`.
+
+    If a previous run is still in progress (its Redis lock is held) this tick exits at once."""
+    redis = ctx.get("cache_redis")
+    token = await _acquire_lock(redis) if redis is not None else ""
+    if token is None:
+        return 0
+    try:
+        return await _process(ctx)
+    finally:
+        if token and redis is not None:
+            await _release_lock(redis, token)
+
+
+async def _process(ctx: dict) -> int:
     factory, http, settings = ctx["session_factory"], ctx["http"], ctx["settings"]
     claimed = await _claim(factory)
     deadline = time.monotonic() + PROCESS_BUDGET_SECONDS

@@ -8,8 +8,16 @@ from sqlalchemy import func, select, update
 from app.core.config import Settings
 from app.db.base import utcnow
 from app.db.outbox import OutboxEvent
-from app.worker.outbox import BATCH_SIZE, LEASE_SECONDS, MAX_ATTEMPTS, process_outbox
+from app.worker.outbox import BATCH_SIZE, LEASE_SECONDS, MAX_ATTEMPTS, OUTBOX_LOCK_KEY, process_outbox
 from tests.factories import make_category
+
+SITE = "https://mawapress.com"
+# Listing pages a change to a post in category "morang" (locales ne + en) can affect.
+LISTING_URLS_MORANG = [
+    f"{SITE}/", f"{SITE}/en", f"{SITE}/ne", f"{SITE}/en/morang", f"{SITE}/en/morang/rss.xml",
+    f"{SITE}/ne/morang", f"{SITE}/ne/morang/rss.xml",
+    f"{SITE}/sitemap.xml", f"{SITE}/news-sitemap.xml", f"{SITE}/rss.xml",
+]
 
 FULL = dict(
     revalidate_url="https://web.test/api/revalidate",
@@ -98,6 +106,7 @@ async def test_cf_purge_gets_absolute_urls(session):
     assert purge.headers["authorization"] == "Bearer cf-token"
     assert rec.body(1) == {"files": [
         "https://mawapress.com/en/morang/en-slug", "https://mawapress.com/ne/morang/ne-slug",
+        *LISTING_URLS_MORANG,
     ]}
 
 
@@ -115,7 +124,10 @@ async def test_redirect_event_revalidates_and_purges_old_and_new_paths(session):
     rec = await run(session)
     paths = rec.body(0)["paths"]
     assert paths == ["/ne/morang/new", "/ne/morang/old", "/ne/sports/new"]  # deduped, order kept
-    assert rec.body(1)["files"] == [f"https://mawapress.com{p}" for p in paths]
+    files = rec.body(1)["files"]
+    assert files[:3] == [f"{SITE}{p}" for p in paths]  # article and redirect paths first
+    assert f"{SITE}/ne/morang" in files and f"{SITE}/ne/morang/rss.xml" in files and f"{SITE}/" in files
+    assert f"{SITE}/en" not in files  # only the locales the post has
 
 
 async def test_unpublished_also_revalidates(session):
@@ -129,7 +141,9 @@ async def test_cf_purge_batches_of_30(session):
     payload = await post_payload(session, slugs={"ne": "new"}, redirects=redirects)
     await add_event(session, "post.updated", payload)
     rec = await run(session, make_settings(revalidate_url=None))
-    assert [len(rec.body(i)["files"]) for i in range(len(rec.requests))] == [30, 30, 11]  # 70 sources + live path
+    batches = [rec.body(i)["files"] for i in range(len(rec.requests))]
+    assert [len(b) for b in batches] == [30, 30, 18]  # 71 article paths + 7 listing/feed urls (locale ne only)
+    assert len({u for b in batches for u in b}) == 78
 
 
 async def test_unset_config_skips_and_marks_processed(session):
@@ -311,8 +325,87 @@ async def test_empty_secret_with_url_is_skipped_and_processed(session, caplog):
 async def test_site_url_trailing_slash_and_error_hides_query(session):
     ev = await add_event(session, payload=await post_payload(session, slugs={"ne": "a"}))
     rec = await run(session, make_settings(site_url="https://mawapress.com/", revalidate_url=None))
-    assert rec.body(0)["files"] == ["https://mawapress.com/ne/morang/a"]
+    files = rec.body(0)["files"]
+    assert files[0] == "https://mawapress.com/ne/morang/a" and "https://mawapress.com/" in files
+    assert not any("//" in f.removeprefix("https://") for f in files)
     bad = await add_event(session, payload={**ev.payload, "slugs": {"ne": "b"}})
     await run(session, make_settings(revalidate_url="https://web.test/r?token=SECRET"), status=500)
     await session.refresh(bad)
     assert "SECRET" not in bad.last_error and "https://web.test/r" in bad.last_error
+
+
+async def test_purge_covers_listings_sitemaps_and_feeds_for_both_categories_on_a_move(session):
+    new = await make_category(session, slug="sports")
+    old = await make_category(session, slug="morang")
+    payload = {"post_id": "p1", "category_id": new.id, "old_category_id": old.id, "slugs": {"ne": "x"},
+               "redirects": [{"from": "/ne/morang/x", "to": "/ne/sports/x"}]}
+    await add_event(session, "post.updated", payload)
+    rec = await run(session, make_settings(revalidate_url=None))
+    files = [u for r in range(len(rec.requests)) for u in rec.body(r)["files"]]
+    assert all(len(rec.body(r)["files"]) <= 30 for r in range(len(rec.requests)))
+    for tail in ("/", "/ne", "/ne/sports", "/ne/sports/rss.xml", "/ne/morang", "/ne/morang/rss.xml",
+                 "/sitemap.xml", "/news-sitemap.xml", "/rss.xml"):
+        assert SITE + tail in files, tail
+    assert len(files) == len(set(files))
+    assert f"{SITE}/en" not in files
+
+
+async def test_backoff_is_capped_at_one_hour(session):
+    ev = await add_event(session, payload=await post_payload(session), attempts=MAX_ATTEMPTS - 2)
+    before = utcnow()
+    await run(session, status=500)
+    await session.refresh(ev)
+    assert ev.dead_at is None and ev.attempts == MAX_ATTEMPTS - 1
+    assert ev.next_attempt_at - before <= timedelta(hours=1, seconds=5)
+    assert ev.next_attempt_at - before >= timedelta(minutes=59)
+
+
+def test_ten_attempts_before_dead_letter():
+    assert MAX_ATTEMPTS == 10
+
+
+async def test_overlapping_run_exits_while_the_lock_is_held(session, fake_redis):
+    ev = await add_event(session, "post.sent_back")
+    await fake_redis.set(OUTBOX_LOCK_KEY, "someone-else", px=60_000)
+    rec = Recorder()
+    async with rec.client() as http:
+        ctx = {**make_ctx(session, http), "cache_redis": fake_redis}
+        assert await process_outbox(ctx) == 0
+    await session.refresh(ev)
+    assert ev.processed_at is None and ev.attempts == 0
+    assert await fake_redis.get(OUTBOX_LOCK_KEY) == "someone-else"  # not ours to release
+
+
+async def test_lock_is_taken_with_a_lease_and_released_after_the_run(session, fake_redis):
+    ev = await add_event(session, "post.sent_back")
+    seen = {}
+    orig = fake_redis.set
+
+    async def spy(*args, **kwargs):
+        seen["kwargs"] = kwargs
+        return await orig(*args, **kwargs)
+
+    fake_redis.set = spy
+    rec = Recorder()
+    async with rec.client() as http:
+        assert await process_outbox({**make_ctx(session, http), "cache_redis": fake_redis}) == 1
+    assert seen["kwargs"].get("nx") is True and seen["kwargs"].get("px") == LEASE_SECONDS * 1000
+    assert await fake_redis.get(OUTBOX_LOCK_KEY) is None
+    await session.refresh(ev)
+    assert ev.processed_at is not None
+
+
+async def test_lock_is_released_when_the_run_blows_up(session, fake_redis, monkeypatch):
+    from app.worker import outbox
+
+    async def boom(factory):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(outbox, "_claim", boom)
+    rec = Recorder()
+    async with rec.client() as http:
+        try:
+            await process_outbox({**make_ctx(session, http), "cache_redis": fake_redis})
+        except RuntimeError:
+            pass
+    assert await fake_redis.get(OUTBOX_LOCK_KEY) is None

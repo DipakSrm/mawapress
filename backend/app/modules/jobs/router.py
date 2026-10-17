@@ -3,7 +3,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -23,8 +23,14 @@ class JobOut(BaseModel):
     topic: str
     attempts: int
     last_error: str | None
+    payload: dict
     created_at: datetime
+    next_attempt_at: datetime | None
     dead_at: datetime | None
+
+
+class RetryDeadOut(BaseModel):
+    requeued: int
 
 
 @router.get("", response_model=list[JobOut])
@@ -37,6 +43,18 @@ async def list_jobs(
     query = select(OutboxEvent).where(OutboxEvent.processed_at.is_(None))
     query = query.where(OutboxEvent.dead_at.is_not(None) if state == "dead" else OutboxEvent.dead_at.is_(None))
     return list((await session.scalars(query.order_by(OutboxEvent.id.desc()).limit(limit))).all())
+
+
+@router.post("/retry-dead", response_model=RetryDeadOut)
+async def retry_dead_jobs(admin: User = Depends(admins), session: AsyncSession = Depends(get_session)) -> RetryDeadOut:
+    """Re-queue every dead-lettered event (attempts reset, due immediately)."""
+    result = await session.execute(
+        update(OutboxEvent)
+        .where(OutboxEvent.dead_at.is_not(None), OutboxEvent.processed_at.is_(None))
+        .values(dead_at=None, next_attempt_at=None, attempts=0)
+    )
+    await session.commit()
+    return RetryDeadOut(requeued=result.rowcount)
 
 
 @router.post("/{job_id}/retry", response_model=JobOut)
