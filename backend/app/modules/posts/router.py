@@ -89,8 +89,8 @@ async def update_post(
     result = await service.update_post(session, user, post_id, if_match, body)
     if result.public_changed:
         await invalidate_public(redis, result.post)
-    if result.slug_change is not None:
-        await invalidate_slug_change(redis, result.slug_change)
+    for change in result.slug_changes:
+        await invalidate_slug_change(redis, change)
     return result.post
 
 

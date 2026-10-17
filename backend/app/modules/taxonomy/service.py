@@ -124,7 +124,7 @@ async def delete_category(session: AsyncSession, cat_id: int) -> None:
     posts = await session.scalar(select(func.count()).select_from(Post).where(Post.category_id == cat_id))
     children = await session.scalar(select(func.count()).select_from(Category).where(Category.parent_id == cat_id))
     if posts or children:
-        raise AppError(409, "CATEGORY_IN_USE", "Move its posts and child categories first",
+        raise AppError(409, "CATEGORY_IN_USE", "Move its posts to another category and move or delete its child categories first",
                        {"posts": posts or 0, "children": children or 0})
     await session.delete(cat)
     await session.commit()

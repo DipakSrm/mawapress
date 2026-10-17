@@ -213,7 +213,7 @@ def _snapshot(tr: PostTranslation) -> dict:
 class UpdateResult(NamedTuple):
     post: Post
     public_changed: bool  # True when readers can see the change (live translation edited, or breaking flag on a live post)
-    slug_change: SlugChange | None = None  # set when an explicit slug change wrote a redirect
+    slug_changes: Sequence[SlugChange] = ()  # one per translation whose public path moved and got a redirect
 
 
 def _requested_slug(user: User, tr: PostTranslation | None, slug: str) -> str | None:
@@ -240,6 +240,11 @@ async def update_post(
         raise AppError(403, "FORBIDDEN_ROLE", "Only editors can mark breaking news")
     _check_version(post, if_match)
     # Validate before changing anything, so a 422 leaves the post untouched.
+    new_category: Category | None = None
+    if data.category_id is not None and data.category_id != post.category_id:
+        new_category = await session.get(Category, data.category_id)
+        if new_category is None:
+            raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
     tags = await taxonomy_service.get_tags(session, data.tag_ids) if data.tag_ids is not None else None
 
     tr = next((t for t in post.translations if t.locale == data.locale), None)
@@ -313,7 +318,8 @@ async def update_post(
     if meta_changed:
         tr.updated_at = now
 
-    slug_change: SlugChange | None = None
+    slug_changes: list[SlugChange] = []
+    redirects: list[dict[str, str]] = []
     redirect: dict[str, str] | None = None
     if new_slug is not None:
         category = await session.get(Category, post.category_id)
@@ -330,8 +336,25 @@ async def update_post(
             raise AppError(409, "SLUG_TAKEN", "That slug is already used by another article in this language") from exc
         tr.updated_at = now
         paths = await seo_service.record_slug_change(session, old_path, new_path)
-        slug_change = SlugChange(tr.locale, old_slug, paths)
+        slug_changes.append(SlugChange(tr.locale, old_slug, paths))
         redirect = {"from": old_path, "to": new_path}
+        redirects.append(redirect)
+
+    category_moved_publicly = False
+    if new_category is not None:
+        old_category = await session.get(Category, post.category_id)
+        post.category_id = new_category.id
+        if post.status == PostStatus.published:
+            for t in post.translations:
+                if t.status != TranslationStatus.published:
+                    continue
+                old_path = seo_service.article_path(t.locale, old_category.slug, t.slug)
+                new_path = seo_service.article_path(t.locale, new_category.slug, t.slug)
+                paths = await seo_service.record_slug_change(session, old_path, new_path)
+                slug_changes.append(SlugChange(t.locale, t.slug, paths))
+                redirects.append({"from": old_path, "to": new_path})
+                t.updated_at = now  # the canonical URL changed
+                category_moved_publicly = True
 
     breaking_changed = data.is_breaking is not None and data.is_breaking != post.is_breaking
     if breaking_changed:
@@ -346,13 +369,17 @@ async def update_post(
     if translation_changed:
         session.add(PostRevision(post_id=post.id, locale=tr.locale, editor_id=user.id, **before))
     # Tags are not public yet. The breaking flag shows on the home page whichever translation is edited.
-    public_changed = post.status == PostStatus.published and (translation_changed or breaking_changed)
+    public_changed = post.status == PostStatus.published and (
+        translation_changed or breaking_changed or category_moved_publicly
+    )
     if public_changed:
         event = _post_event("post.updated", post)
-        if redirect is not None:
-            event.payload = {**event.payload, "redirect": redirect}  # lets the worker purge the old URL
+        if redirects:  # lets the worker purge the old URLs
+            event.payload = {**event.payload, "redirects": redirects}
+            if redirect is not None:
+                event.payload["redirect"] = redirect
         session.add(event)
-    return UpdateResult(await _save(session, post), public_changed, slug_change)
+    return UpdateResult(await _save(session, post), public_changed, slug_changes)
 
 
 async def list_revisions(
