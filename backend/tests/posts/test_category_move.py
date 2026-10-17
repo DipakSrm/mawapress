@@ -117,3 +117,32 @@ async def test_category_can_be_deleted_once_its_posts_moved_out(client, session)
     assert "another category" in blocked.json()["error"]["message"]
     assert (await move(client, editor, live, new_cat.id)).status_code == 200
     assert (await client.delete(f"/api/categories/{old_cat.id}", headers=auth_header(editor))).status_code == 204
+
+
+async def test_slug_and_category_changed_together(client, session):
+    editor = await make_user(session, role=Role.editor)
+    old_cat = await make_category(session)
+    new_cat = await make_category(session, slug="sports", name_ne="खेलकुद", name_en="Sports")
+    live = await publish_via_api(client, editor, await create_post_via_api(client, editor, old_cat))
+    assert (await client.get("/api/public/posts/ne/badhi-samachar")).status_code == 200  # warm cache
+
+    r = await client.patch(
+        f"/api/posts/{live['id']}",
+        json={"locale": "ne", "slug": "flood-news", "category_id": new_cat.id},
+        headers=auth_if_match(editor, live["updated_at"]),
+    )
+    assert r.status_code == 200, r.text
+    final = "/ne/sports/flood-news"
+    assert r.json()["translations"][0]["seo_auto"]["canonical"].endswith(final)
+
+    rows = (await session.scalars(select(Redirect))).all()
+    assert {(x.from_path, x.to_path) for x in rows} == {(OLD, final), ("/ne/morang/flood-news", final)}
+    assert all(x.from_path != x.to_path for x in rows)
+
+    public = await client.get("/api/public/posts/ne/flood-news")
+    assert public.status_code == 200
+    assert public.json()["category_slug"] == "sports"
+    assert (await client.get("/api/public/posts/ne/badhi-samachar")).status_code == 404
+    for old in (OLD, "/ne/morang/flood-news"):
+        resolved = await client.get("/api/public/redirects/resolve", params={"path": old})
+        assert resolved.json() == {"to_path": final, "code": 301}
