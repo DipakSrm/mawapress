@@ -64,7 +64,10 @@ const post = {
   ],
 } as unknown as PostOut;
 
+const saves: { body: Record<string, unknown>; ifMatch: string | null }[] = [];
+
 function mount() {
+  saves.length = 0;
   mockSignedIn(editor);
   server.use(
     http.get("*/api/categories", () =>
@@ -84,7 +87,13 @@ function mount() {
     http.get("*/api/media", () =>
       HttpResponse.json({ items: [MEDIA, ORIGINAL_ONLY], total: 2, limit: 24, offset: 0 }),
     ),
-    http.patch("*/api/posts/:id", () => HttpResponse.json(post)),
+    http.patch("*/api/posts/:id", async ({ request }) => {
+      saves.push({
+        body: (await request.json()) as Record<string, unknown>,
+        ifMatch: request.headers.get("if-match"),
+      });
+      return HttpResponse.json(post);
+    }),
   );
   renderWithSession(<PostEditor initial={post} />);
   return userEvent.setup();
@@ -95,7 +104,7 @@ describe("media picker in the editor", () => {
     const user = mount();
     await user.click(await screen.findByRole("button", { name: "Image" }));
     const dialog = await screen.findByRole("dialog", { name: "Insert an image" });
-    await user.click(await within(dialog).findByRole("button", { name: "नदी" }));
+    await user.click(await within(dialog).findByRole("button", { name: /^नदी/ }));
     await user.click(within(dialog).getByRole("button", { name: "Use image" }));
 
     await waitFor(() => {
@@ -103,32 +112,38 @@ describe("media picker in the editor", () => {
       expect(img).toHaveAttribute("src", "/media/a-1024.webp");
       expect(img).toHaveAttribute("alt", "नदी");
     });
+    expect(screen.getByLabelText("Image caption")).toHaveValue("Koshi in flood");
     expect(screen.queryByRole("dialog", { name: "Insert an image" })).toBeNull();
   });
 
-  it("falls back to the original and to the caption when there is no variant or alt", async () => {
+  it("falls back to the original, and leaves alt empty when only a caption exists", async () => {
     const user = mount();
     await user.click(await screen.findByRole("button", { name: "Image" }));
     const dialog = await screen.findByRole("dialog", { name: "Insert an image" });
-    await user.click(await within(dialog).findByRole("button", { name: "Only a caption" }));
+    await user.click(await within(dialog).findByRole("button", { name: /^Only a caption/ }));
     await user.click(within(dialog).getByRole("button", { name: "Use image" }));
 
     await waitFor(() => {
       const img = document.querySelector(".ProseMirror img");
       expect(img).toHaveAttribute("src", "/media/b.jpg");
-      expect(img).toHaveAttribute("alt", "Only a caption");
+      expect(img?.getAttribute("alt") ?? "").toBe("");
     });
+    expect(screen.getByLabelText("Image caption")).toHaveValue("Only a caption");
   });
 
   it("sets and removes the featured image", async () => {
     const user = mount();
     await user.click(await screen.findByRole("button", { name: "Choose image" }));
     const dialog = await screen.findByRole("dialog", { name: "Choose the featured image" });
-    await user.click(await within(dialog).findByRole("button", { name: "नदी" }));
+    await user.click(await within(dialog).findByRole("button", { name: /^नदी/ }));
     await user.click(within(dialog).getByRole("button", { name: "Use image" }));
 
     const featured = await screen.findByRole("img", { name: "नदी" });
     expect(featured).toHaveAttribute("src", "/media/a-320.webp");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    expect(saves[0].body).toMatchObject({ featured_media_id: MEDIA.id });
+    expect(saves[0].ifMatch).toBe(post.updated_at);
     await user.click(screen.getByRole("button", { name: "Remove" }));
     expect(screen.queryByRole("img", { name: "नदी" })).toBeNull();
   });

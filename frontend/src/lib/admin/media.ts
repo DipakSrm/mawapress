@@ -33,10 +33,14 @@ export function mediaArticleUrl(media: MediaOut): string {
   return media.variants["1024"] ?? media.url;
 }
 
-/** Alt text in the editor's language, falling back to the caption. */
+/**
+ * Alt text in the editor's language, then the other language's. A caption alone gives an empty alt: the
+ * caption is shown under the image, so a screen reader would otherwise read the same text twice.
+ */
 export function mediaAlt(media: MediaOut, locale: "ne" | "en"): string {
   const own = locale === "ne" ? media.alt_ne : media.alt_en;
-  return own || media.caption || "";
+  const other = locale === "ne" ? media.alt_en : media.alt_ne;
+  return own || other || "";
 }
 
 /** Short label for a grid cell and for screen readers. */

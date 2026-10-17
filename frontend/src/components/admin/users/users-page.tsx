@@ -29,6 +29,7 @@ import {
 import { formatDateTime } from "@/lib/admin/post-display";
 import {
   MIN_PASSWORD,
+  ROLE_RANK_OF,
   ROLE_LABEL,
   ROLES,
   userError,
@@ -158,10 +159,18 @@ function EditDialog({ user, onClose }: { user: StaffUser; onClose: () => void })
   const [active, setActive] = useState(user.is_active);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  const deactivates = user.is_active && !active;
+  const lowersRole = ROLE_RANK_OF[role] < ROLE_RANK_OF[user.role];
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (busy) return;
+    if ((deactivates || lowersRole) && !confirming) {
+      setConfirming(true);
+      return;
+    }
     setBusy(true);
     setError(null);
     const changes: Record<string, unknown> = {};
@@ -206,7 +215,10 @@ function EditDialog({ user, onClose }: { user: StaffUser; onClose: () => void })
             <NativeSelect
               id="edit-user-role"
               value={role}
-              onChange={(e) => setRole(e.target.value as Role)}
+              onChange={(e) => {
+                setRole(e.target.value as Role);
+                setConfirming(false);
+              }}
             >
               {ROLES.map((r) => (
                 <option key={r} value={r}>
@@ -222,8 +234,24 @@ function EditDialog({ user, onClose }: { user: StaffUser; onClose: () => void })
                 Inactive users cannot sign in.
               </span>
             </Label>
-            <Switch id="edit-user-active" checked={active} onCheckedChange={setActive} />
+            <Switch
+              id="edit-user-active"
+              checked={active}
+              onCheckedChange={(v) => {
+                setActive(v);
+                setConfirming(false);
+              }}
+            />
           </div>
+          {confirming && !error && (
+            <p role="alert" className="rounded-lg bg-amber-500/10 p-3 text-sm">
+              {deactivates
+                ? `${user.name} will be deactivated`
+                : `${user.name} will become ${ROLE_LABEL[role]}`}
+              {deactivates && lowersRole ? ` and become ${ROLE_LABEL[role]}` : ""} and signed out
+              everywhere. Continue?
+            </p>
+          )}
           <ErrorLine message={error} />
           <DialogFooter>
             <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
@@ -231,7 +259,7 @@ function EditDialog({ user, onClose }: { user: StaffUser; onClose: () => void })
             </Button>
             <Button type="submit" disabled={busy}>
               {busy && <Loader2 aria-hidden className="animate-spin" />}
-              Save
+              {confirming ? "Confirm and save" : "Save"}
             </Button>
           </DialogFooter>
         </form>

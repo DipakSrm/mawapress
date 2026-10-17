@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { describeError } from "@/lib/admin/errors";
 import { MIN_PASSWORD, ROLE_LABEL } from "@/lib/admin/users";
-import { api, setAccessToken, type components } from "@/lib/api";
+import { api, expireSession, setAccessToken, type components } from "@/lib/api";
 import { useSession, type SessionUser } from "@/lib/auth";
 
 type MeUpdateOut = components["schemas"]["MeUpdateOut"];
@@ -115,7 +115,13 @@ function PasswordForm() {
         new_password: next,
       });
       // Every session was revoked except this one, which got a fresh token: keep using it.
-      if (out.access_token) setAccessToken(out.access_token);
+      if (!out.access_token) {
+        // The password changed but the server sent no fresh token: this session is revoked.
+        toast.error("Your password was changed. Sign in again with the new password.");
+        expireSession();
+        return;
+      }
+      setAccessToken(out.access_token);
       setCurrent("");
       setNext("");
       toast.success("Password changed. Your other devices are signed out.");

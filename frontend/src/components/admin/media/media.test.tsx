@@ -91,12 +91,29 @@ describe("media detail", () => {
         return HttpResponse.json({ ...MEDIA, ...body });
       }),
     );
-    await user.click(await screen.findByRole("button", { name: "A river" }));
+    await user.click(await screen.findByRole("button", { name: /^A river/ }));
     const alt = await screen.findByLabelText("Alt text (नेपाली)");
     await user.type(alt, "नदी");
     expect(bodies).toHaveLength(0);
     await user.tab();
     await waitFor(() => expect(bodies).toEqual([{ alt_ne: "नदी" }]));
+  });
+
+  it("saves a pending edit when the sheet is closed with Escape", async () => {
+    const bodies: unknown[] = [];
+    const user = mount();
+    server.use(
+      http.patch("*/api/media/:id", async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return HttpResponse.json({ ...MEDIA, ...body });
+      }),
+    );
+    await user.click(await screen.findByRole("button", { name: /^A river/ }));
+    await user.type(await screen.findByLabelText("Caption"), "Koshi in flood");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(bodies).toEqual([{ caption: "Koshi in flood" }]));
+    await waitFor(() => expect(screen.queryByLabelText("Caption")).toBeNull());
   });
 
   it("shows why an image in use cannot be deleted", async () => {
@@ -109,7 +126,7 @@ describe("media detail", () => {
         ),
       ),
     );
-    await user.click(await screen.findByRole("button", { name: "A river" }));
+    await user.click(await screen.findByRole("button", { name: /^A river/ }));
     await user.click(await screen.findByRole("button", { name: "Delete image" }));
     const dialog = await screen.findByRole("dialog", { name: "Delete this image?" });
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
@@ -125,7 +142,7 @@ describe("media detail", () => {
     );
     renderWithSession(<MediaLibrary />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "A river" }));
+    await user.click(await screen.findByRole("button", { name: /^A river/ }));
     await screen.findByLabelText("Alt text (English)");
     expect(screen.queryByRole("button", { name: "Delete image" })).toBeNull();
   });

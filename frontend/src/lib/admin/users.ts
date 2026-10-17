@@ -13,6 +13,7 @@ export const ROLE_LABEL: Record<Role, string> = {
   editor: "Editor",
   admin: "Admin",
 };
+export { ROLE_RANK as ROLE_RANK_OF } from "@/lib/auth/roles";
 export const MIN_PASSWORD = 10;
 
 export function useUsers() {

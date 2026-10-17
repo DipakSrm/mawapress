@@ -21,6 +21,7 @@ import type { MediaOut } from "@/lib/admin/media";
 import { api, isApiError } from "@/lib/api";
 
 type Field = "alt_ne" | "alt_en" | "caption";
+const FIELDS: Field[] = ["alt_ne", "alt_en", "caption"];
 
 function absoluteUrl(url: string): string {
   return url.startsWith("/") ? `${window.location.origin}${url}` : url;
@@ -43,28 +44,52 @@ export function MediaDetail({ media, canDelete, onChange, onDeleted, onClose }: 
     caption: media.caption ?? "",
   });
   const saved = useRef({ ...values });
-  const [saving, setSaving] = useState<Field | null>(null);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  async function save(field: Field) {
-    const value = values[field].trim();
-    if (value === saved.current[field]) return;
-    setSaving(field);
-    setError(null);
-    try {
-      const out = await api.patch<MediaOut>(`/api/media/${media.id}`, { [field]: value || null });
-      saved.current = { ...saved.current, [field]: value };
-      onChange(out);
-      void queryClient.invalidateQueries({ queryKey: ["media"] });
-    } catch (e) {
-      setError(isApiError(e) ? e.message : "Could not save. Try again.");
-    } finally {
-      setSaving((s) => (s === field ? null : s));
-    }
+  const inflight = useRef<Promise<boolean>>(Promise.resolve(true));
+  const valuesRef = useRef(values);
+  valuesRef.current = values;
+
+  /** Saves every changed field in one PATCH. Resolves false when the save failed. */
+  function flush(): Promise<boolean> {
+    const run = inflight.current.then(async () => {
+      const changes: Partial<Record<Field, string | null>> = {};
+      const trimmed: Partial<Record<Field, string>> = {};
+      for (const f of FIELDS) {
+        const v = valuesRef.current[f].trim();
+        if (v !== saved.current[f]) {
+          changes[f] = v || null;
+          trimmed[f] = v;
+        }
+      }
+      if (Object.keys(changes).length === 0) return true;
+      setSaving(true);
+      setError(null);
+      try {
+        const out = await api.patch<MediaOut>(`/api/media/${media.id}`, changes);
+        saved.current = { ...saved.current, ...trimmed };
+        onChange(out);
+        void queryClient.invalidateQueries({ queryKey: ["media"] });
+        return true;
+      } catch (e) {
+        setError(isApiError(e) ? e.message : "Could not save. Try again.");
+        return false;
+      } finally {
+        setSaving(false);
+      }
+    });
+    inflight.current = run;
+    return run;
+  }
+
+  /** Every close path (Escape, X, overlay) saves first and closes once the save has gone through. */
+  async function close() {
+    if (await flush()) onClose();
   }
 
   async function copy() {
@@ -103,12 +128,12 @@ export function MediaDetail({ media, canDelete, onChange, onDeleted, onClose }: 
     value: values[field],
     onChange: (e: { target: { value: string } }) =>
       setValues((v) => ({ ...v, [field]: e.target.value })),
-    onBlur: () => void save(field),
+    onBlur: () => void flush(),
   });
 
   return (
     <>
-      <Sheet open onOpenChange={(open) => !open && onClose()}>
+      <Sheet open onOpenChange={(open) => !open && void close()}>
         <SheetContent side="right" className="w-full gap-0 sm:max-w-md">
           <div className="border-b p-4 pr-12">
             <SheetTitle>Image details</SheetTitle>

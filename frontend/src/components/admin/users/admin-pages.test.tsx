@@ -39,11 +39,15 @@ const USERS = [
 ];
 
 describe("users page", () => {
-  it("shows LAST_ADMIN when the server refuses a demotion", async () => {
+  it("asks before demoting, then shows LAST_ADMIN when the server refuses", async () => {
     mockSignedIn(admin);
+    let patches = 0;
     server.use(
       http.get("*/api/users", () => HttpResponse.json(USERS)),
-      http.patch("*/api/users/:id", () => apiError(409, "LAST_ADMIN")),
+      http.patch("*/api/users/:id", () => {
+        patches++;
+        return apiError(409, "LAST_ADMIN");
+      }),
     );
     renderWithSession(<UsersPage />);
     const user = userEvent.setup();
@@ -51,9 +55,14 @@ describe("users page", () => {
     const dialog = await screen.findByRole("dialog");
     await user.selectOptions(within(dialog).getByLabelText("Role"), "editor");
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "At least one active admin must remain",
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/will become Editor/);
+    await user.click(within(dialog).getByRole("button", { name: "Confirm and save" }));
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent(
+        "At least one active admin must remain",
+      ),
     );
+    expect(patches).toBe(1);
   });
 
   it("shows CANNOT_MODIFY_SELF and EMAIL_TAKEN", async () => {
@@ -69,7 +78,10 @@ describe("users page", () => {
     let dialog = await screen.findByRole("dialog");
     await user.selectOptions(within(dialog).getByLabelText("Role"), "editor");
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/your own account/);
+    await user.click(await within(dialog).findByRole("button", { name: "Confirm and save" }));
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent(/your own account/),
+    );
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
     await user.click(screen.getByRole("button", { name: "New user" }));
@@ -164,6 +176,17 @@ describe("profile page", () => {
     await waitFor(() => expect(getAccessToken()).toBe("fresh-token"));
     expect(body).toEqual({ current_password: "old-password-1", new_password: "new-password-22" });
     expect(screen.getByLabelText("Current password")).toHaveValue("");
+  });
+
+  it("treats a password change without a token as a sign-out", async () => {
+    mockSignedIn(admin);
+    server.use(http.patch("*/api/auth/me", () => HttpResponse.json({ ...admin })));
+    renderWithSession(<ProfilePage />);
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("Current password"), "old-password-1");
+    await user.type(screen.getByLabelText("New password"), "new-password-22");
+    await user.click(screen.getByRole("button", { name: "Change password" }));
+    await waitFor(() => expect(getAccessToken()).toBeNull());
   });
 
   it("shows PASSWORD_UNCHANGED and keeps the current token", async () => {

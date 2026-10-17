@@ -17,7 +17,7 @@ export function MediaGrid({ items, selectedId, onSelect, label }: Props) {
       aria-label={label}
       className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
     >
-      {items.map((m) => {
+      {items.map((m, i) => {
         const selected = m.id === selectedId;
         return (
           <li key={m.id}>
@@ -25,7 +25,7 @@ export function MediaGrid({ items, selectedId, onSelect, label }: Props) {
               type="button"
               onClick={() => onSelect(m)}
               aria-pressed={selected}
-              aria-label={mediaLabel(m)}
+              aria-label={`${mediaLabel(m)}, ${m.width}×${m.height}, number ${i + 1}`}
               className={cn(
                 "group relative block aspect-square w-full overflow-hidden rounded-lg bg-muted ring-1 ring-foreground/10 outline-none focus-visible:ring-3 focus-visible:ring-ring",
                 selected && "ring-2 ring-primary",
