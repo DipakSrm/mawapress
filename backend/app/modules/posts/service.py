@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta
 from typing import NamedTuple
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
@@ -534,6 +534,7 @@ def _apply_publish(session: AsyncSession, post: Post, now: datetime, published_a
     post.status = PostStatus.published
     post.published_at = post.published_at or published_at
     post.scheduled_at = None
+    _reset_schedule_state(post)
     post.updated_at = now
     for tr in post.translations:  # only the translations that exist right now
         if tr.status != TranslationStatus.published:
@@ -545,6 +546,20 @@ def _apply_publish(session: AsyncSession, post: Post, now: datetime, published_a
 
 SCHEDULE_MIN_LEAD = timedelta(seconds=60)
 SCHEDULE_MAX_AHEAD = timedelta(days=365)
+SCHEDULE_LATE_GRACE = timedelta(minutes=5)  # published later than this after scheduled_at: published_at is "now"
+SCHEDULE_MAX_ATTEMPTS = 10  # after this many failed publishes the scheduler stops trying (the error stays visible)
+SCHEDULE_BACKOFF_CAP = timedelta(minutes=60)
+SCHEDULE_ERROR_MAX_LEN = 500
+
+
+def schedule_backoff(attempts: int) -> timedelta:
+    return min(timedelta(minutes=2**attempts), SCHEDULE_BACKOFF_CAP)
+
+
+def _reset_schedule_state(post: Post) -> None:
+    post.schedule_attempts = 0
+    post.schedule_last_error = None
+    post.schedule_retry_at = None
 
 
 async def schedule_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None, when: datetime) -> Post:
@@ -560,6 +575,7 @@ async def schedule_post(session: AsyncSession, post_id: uuid.UUID, if_match: str
         raise AppError(422, "INVALID_SCHEDULE_TIME", "scheduled_at must be at most one year ahead")
     post.status = PostStatus.scheduled
     post.scheduled_at = when
+    _reset_schedule_state(post)
     post.updated_at = now
     return await _save(session, post)
 
@@ -571,18 +587,47 @@ async def unschedule_post(session: AsyncSession, post_id: uuid.UUID, if_match: s
         raise AppError(409, "INVALID_TRANSITION", f"Cannot unschedule a post that is {post.status.value}")
     post.status = PostStatus.draft
     post.scheduled_at = None
+    _reset_schedule_state(post)
     post.updated_at = utcnow()
     return await _save(session, post)
 
 
 async def due_post_ids(session: AsyncSession, limit: int) -> list[uuid.UUID]:
+    """Scheduled posts whose time has come, healthy ones first.
+
+    Posts that failed before are skipped while backing off and for good after SCHEDULE_MAX_ATTEMPTS, and
+    sort after never-failed posts (attempts, then scheduled time), so poison posts cannot starve the rest."""
+    now = utcnow()
     stmt = (
         select(Post.id)
-        .where(Post.status == PostStatus.scheduled, Post.scheduled_at <= utcnow())
-        .order_by(Post.scheduled_at, Post.id)
+        .where(
+            Post.status == PostStatus.scheduled,
+            Post.scheduled_at <= now,
+            Post.schedule_attempts < SCHEDULE_MAX_ATTEMPTS,
+            or_(Post.schedule_retry_at.is_(None), Post.schedule_retry_at <= now),
+        )
+        .order_by(Post.schedule_attempts, Post.scheduled_at, Post.id)
         .limit(limit)
     )
     return list((await session.scalars(stmt)).all())
+
+
+async def record_schedule_failure(session: AsyncSession, post_id: uuid.UUID, exc: Exception) -> None:
+    """Count a failed scheduled publish, remember why and push the next attempt out. Commits.
+
+    Leaves updated_at alone, so editors' If-Match versions stay valid."""
+    post = await session.scalar(
+        select(Post)
+        .where(Post.id == post_id, Post.status == PostStatus.scheduled)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if post is None:
+        return
+    post.schedule_attempts += 1
+    post.schedule_last_error = f"{type(exc).__name__}: {exc}"[:SCHEDULE_ERROR_MAX_LEN]
+    post.schedule_retry_at = utcnow() + schedule_backoff(post.schedule_attempts)
+    await session.commit()
 
 
 async def publish_due_post(session: AsyncSession, post_id: uuid.UUID) -> Post | None:
@@ -590,6 +635,7 @@ async def publish_due_post(session: AsyncSession, post_id: uuid.UUID) -> Post | 
 
     Returns None when the post is no longer due (published, unscheduled, rescheduled) or another
     worker holds its row lock (SKIP LOCKED), so overlapping runs never double-publish.
+    A post published more than SCHEDULE_LATE_GRACE after its time counts as published now.
     """
     stmt = (
         select(Post)
@@ -600,7 +646,9 @@ async def publish_due_post(session: AsyncSession, post_id: uuid.UUID) -> Post | 
     post = await session.scalar(stmt)
     if post is None:
         return None
-    _apply_publish(session, post, utcnow(), post.scheduled_at)
+    now = utcnow()
+    due = post.scheduled_at
+    _apply_publish(session, post, now, due if now - due <= SCHEDULE_LATE_GRACE else now)
     return await _save(session, post)
 
 

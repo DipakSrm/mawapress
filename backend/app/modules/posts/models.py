@@ -67,6 +67,10 @@ class Post(Base):
     view_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Scheduler bookkeeping: failed publish attempts, the last error, and when the next attempt may start.
+    schedule_attempts: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    schedule_last_error: Mapped[str | None] = mapped_column(Text)
+    schedule_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 

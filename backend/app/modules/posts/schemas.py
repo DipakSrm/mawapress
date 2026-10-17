@@ -71,6 +71,8 @@ class PostOut(BaseModel):
     featured_media: MediaOut | None
     published_at: datetime | None
     scheduled_at: datetime | None
+    schedule_attempts: int
+    schedule_last_error: str | None
     updated_at: datetime
     translations: list[TranslationOut]
     tags: list[TagOut]
