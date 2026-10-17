@@ -1,6 +1,7 @@
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Path, Query
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +28,7 @@ from app.modules.public.service import invalidate_public, invalidate_slug_change
 from app.modules.users.models import Role, User
 
 router = APIRouter(prefix="/api/posts", tags=["posts"])
+RevisionId = Annotated[int, Path(ge=1, le=2**63 - 1)]  # revision ids are BIGINT; anything larger would be a 500
 any_staff = require_role(Role.reporter)
 editors = require_role(Role.editor)
 
@@ -204,7 +206,7 @@ async def list_revisions(
 @router.get("/{post_id}/revisions/{rev_id}", response_model=RevisionOut)
 async def get_revision(
     post_id: uuid.UUID,
-    rev_id: int,
+    rev_id: RevisionId,
     user: User = Depends(any_staff),
     session: AsyncSession = Depends(get_session),
 ):
@@ -214,7 +216,7 @@ async def get_revision(
 @router.post("/{post_id}/revisions/{rev_id}/restore", response_model=PostOut)
 async def restore_revision(
     post_id: uuid.UUID,
-    rev_id: int,
+    rev_id: RevisionId,
     if_match: str | None = Header(default=None),
     user: User = Depends(editors),
     session: AsyncSession = Depends(get_session),

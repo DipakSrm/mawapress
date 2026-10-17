@@ -1,9 +1,10 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
 from app.db.base import utcnow
 from app.db.outbox import OutboxEvent
+from app.modules.posts.models import Post, TranslationStatus
 from app.modules.public.service import FEED_GEN_KEY, post_cache_key
 from app.modules.users.models import Role
 from tests.factories import (
@@ -135,7 +136,6 @@ async def test_unarchive_without_published_translation_is_rejected(client, sessi
     arch = (await client.post(
         f"/api/posts/{post['id']}/unpublish", headers=auth_if_match(editor, live["updated_at"])
     )).json()
-    from app.modules.posts.models import Post, TranslationStatus
     row = await session.get(Post, post["id"])
     for t in row.translations:
         t.status = TranslationStatus.draft
@@ -152,3 +152,36 @@ async def test_unarchive_wrong_status(client, session):
     _, editor, post = await setup(client, session)
     r = await client.post(f"/api/posts/{post['id']}/unarchive", headers=auth_if_match(editor, post["updated_at"]))
     assert r.status_code == 409 and r.json()["error"]["code"] == "INVALID_TRANSITION"
+
+
+async def test_unarchive_requires_a_current_version(client, session):
+    _, editor, post = await setup(client, session)
+    live = await publish_via_api(client, editor, post)
+    arch = (await client.post(
+        f"/api/posts/{post['id']}/unpublish", headers=auth_if_match(editor, live["updated_at"])
+    )).json()
+    stale = await client.post(
+        f"/api/posts/{post['id']}/unarchive", headers=auth_if_match(editor, live["updated_at"])
+    )
+    assert stale.status_code == 412 and stale.json()["error"]["code"] == "VERSION_CONFLICT"
+    assert (await session.get(Post, post["id"])).status.value == "archived"
+    assert arch["status"] == "archived"
+
+
+async def test_publish_now_from_scheduled(client, session, fake_redis):
+    _, editor, post = await setup(client, session)
+    sched = (await schedule(client, editor, post, iso(timedelta(hours=3)))).json()
+    url = f"/api/posts/{post['id']}/publish"
+    assert (await client.post(url, headers=auth_header(editor))).status_code == 428
+    assert (await client.post(url, headers=auth_if_match(editor, post["updated_at"]))).status_code == 412
+
+    before = utcnow()
+    r = await client.post(url, headers=auth_if_match(editor, sched["updated_at"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "published" and body["scheduled_at"] is None
+    assert datetime.fromisoformat(body["published_at"]) >= before
+    assert body["translations"][0]["status"] == "published"
+    topics = (await session.scalars(select(OutboxEvent.topic).order_by(OutboxEvent.id))).all()
+    assert topics == ["post.published"]
+    assert (await client.get(f"/api/public/posts/ne/{body['translations'][0]['slug']}")).status_code == 200

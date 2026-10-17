@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.config import Settings
 from app.core.storage import LocalStorage
@@ -234,3 +234,51 @@ def test_s3_storage_requires_all_settings(missing):
 def test_unknown_storage_is_rejected():
     with pytest.raises(ValueError):
         Settings(storage="gcs")
+
+
+# ---- patch vs. concurrent delete -----------------------------------------------------------
+
+async def test_patch_waits_for_a_concurrent_delete_and_then_404s(engine, tmp_path):
+    """patch_media takes the media row FOR UPDATE: it queues behind an in-flight delete and sees a 404,
+    instead of loading the row, losing it to the delete and failing the UPDATE with a 500."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.core.errors import AppError
+    from app.modules.media import service
+    from app.modules.media.schemas import MediaPatch
+
+    async with AsyncSession(engine, expire_on_commit=False) as s:
+        user = await make_user(s, role=Role.editor)
+        media = Media(key=f"media/race/{uuid_hex()}.png", mime="image/png", width=1, height=1, size_bytes=1,
+                      uploader_id=user.id, variant_keys={})
+        s.add(media)
+        await s.commit()
+        media_id, user_id = media.id, user.id
+
+    deleter = AsyncSession(engine)
+    patcher = AsyncSession(engine, expire_on_commit=False)
+    try:
+        await deleter.execute(select(Media).where(Media.id == media_id).with_for_update())  # the delete is in flight
+        patcher_user = await patcher.get(type(user), user_id)
+        task = asyncio.create_task(service.patch_media(patcher, patcher_user, media_id, MediaPatch(alt_ne="x")))
+        done, _ = await asyncio.wait({task}, timeout=0.5)
+        assert not done, "patch_media must block on the row lock while a delete is in flight"
+        await deleter.delete(await deleter.get(Media, media_id))
+        await deleter.commit()
+        with pytest.raises(AppError) as exc:
+            await asyncio.wait_for(task, timeout=5)
+        assert exc.value.status == 404
+    finally:
+        await deleter.close()
+        await patcher.close()
+        async with AsyncSession(engine) as s:
+            await s.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+            await s.commit()
+
+
+def uuid_hex() -> str:
+    import uuid
+
+    return uuid.uuid4().hex

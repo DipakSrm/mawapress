@@ -70,7 +70,12 @@ async def patch_media(
     session: AsyncSession, user: User, media_id: uuid.UUID, data: MediaPatch
 ) -> tuple[Media, list[Post]]:
     """Returns the media and the live posts whose public pages changed (the caller invalidates their caches)."""
-    media = await get_media(session, media_id)
+    # FOR UPDATE: a concurrent delete either finishes first (404 here) or waits for this commit.
+    media = await session.scalar(
+        select(Media).where(Media.id == media_id).with_for_update().execution_options(populate_existing=True)
+    )
+    if media is None:
+        raise AppError(404, "MEDIA_NOT_FOUND", "Media not found")
     if media.uploader_id != user.id and ROLE_RANK[user.role] < ROLE_RANK[Role.editor]:
         raise AppError(403, "FORBIDDEN_ROLE", "You cannot edit this media")
     changed = False

@@ -510,7 +510,7 @@ async def submit_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> 
 
 
 async def publish_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None) -> Post:
-    """Publish a draft or in-review post (editor+; the router enforces the role).
+    """Publish a draft, in-review or scheduled post (editor+; the router enforces the role).
 
     Editors own publishing, so a draft does not need to be submitted first (decided in M2a part 2).
     Publishing publishes the translations that exist at this moment and bumps their updated_at,
@@ -518,7 +518,7 @@ async def publish_post(session: AsyncSession, post_id: uuid.UUID, if_match: str 
     """
     post = await _get_post_for_update(session, post_id)
     _check_version(post, if_match)
-    if post.status not in (PostStatus.draft, PostStatus.in_review):
+    if post.status not in (PostStatus.draft, PostStatus.in_review, PostStatus.scheduled):
         raise AppError(409, "INVALID_TRANSITION", f"Cannot publish a post that is {post.status.value}")
     now = utcnow()
     _apply_publish(session, post, now, now)

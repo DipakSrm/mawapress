@@ -12,9 +12,9 @@ from app.core.storage import get_storage
 from app.db.session import SessionLocal, engine
 from app.modules.media.variants import make_variants
 from app.worker.maintenance import purge_refresh_tokens
-from app.worker.views import FLUSH_TIMEOUT_SECONDS, flush_views
-from app.worker.scheduler import SCHEDULER_TIMEOUT_SECONDS, publish_due_posts
 from app.worker.outbox import CRON_TIMEOUT_SECONDS, new_http_client, process_outbox
+from app.worker.scheduler import SCHEDULER_TIMEOUT_SECONDS, publish_due_posts
+from app.worker.views import FLUSH_TIMEOUT_SECONDS, flush_views
 
 
 async def startup(ctx: dict) -> None:

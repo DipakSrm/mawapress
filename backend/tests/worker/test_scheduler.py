@@ -12,11 +12,10 @@ from app.modules.posts import service
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
 from app.modules.public.service import FEED_GEN_KEY, post_cache_key
 from app.modules.taxonomy.models import Category
-from app.modules.users.models import User
+from app.modules.users.models import Role, User
 from app.worker.scheduler import SCHEDULER_TIMEOUT_SECONDS, publish_due_posts
 from app.worker.settings import WorkerSettings
 from tests.factories import auth_if_match, create_post_via_api, doc, make_category, make_user
-from app.modules.users.models import Role
 
 
 def make_ctx(session, redis) -> dict:

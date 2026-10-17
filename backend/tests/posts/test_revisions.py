@@ -162,3 +162,16 @@ async def test_revision_detail_guards(client, session):
     assert wrong_post.json()["error"]["code"] == "REVISION_NOT_FOUND"
     missing = await client.get(f"/api/posts/{live['id']}/revisions/999999", headers=auth_header(editor))
     assert missing.status_code == 404
+
+
+async def test_revision_id_beyond_bigint_is_a_422_not_a_500(client, session):
+    editor, live = await live_post(client, session)
+    for rev_id in (2**63, 0):
+        got = await client.get(f"/api/posts/{live['id']}/revisions/{rev_id}", headers=auth_header(editor))
+        assert got.status_code == 422, rev_id
+        restored = await client.post(
+            f"/api/posts/{live['id']}/revisions/{rev_id}/restore", headers=auth_if_match(editor, live["updated_at"])
+        )
+        assert restored.status_code == 422, rev_id
+    ok = await client.get(f"/api/posts/{live['id']}/revisions/{2**63 - 1}", headers=auth_header(editor))
+    assert ok.status_code == 404
