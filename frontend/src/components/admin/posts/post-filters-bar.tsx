@@ -1,6 +1,6 @@
 "use client";
 
-import { Search, X } from "lucide-react";
+import { Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,31 +13,17 @@ import {
   type Locale,
   type PostFilters,
 } from "@/lib/admin/post-filters";
+import { useAuthors } from "@/lib/admin/authors";
 import type { Category } from "@/lib/admin/posts";
-import { api } from "@/lib/api";
-import type { components } from "@/lib/api";
-import { useQuery } from "@tanstack/react-query";
 
 export const SEARCH_DEBOUNCE_MS = 300;
 const LOCALE_LABEL: Record<Locale, string> = { ne: "Nepali", en: "English" };
 
-type StaffUser = components["schemas"]["UserOut"];
-
-/** Only admins may list users; editors filter by author from the post rows instead. */
-function useAuthors(enabled: boolean) {
-  return useQuery({
-    queryKey: ["users"],
-    queryFn: () => api.get<StaffUser[]>("/api/users"),
-    enabled,
-    staleTime: 5 * 60_000,
-  });
-}
-
 interface Props {
   filters: PostFilters;
   categories: Category[] | undefined;
+  /** Editors and admins get an author select. */
   canFilterAuthor: boolean;
-  isAdmin: boolean;
   authorLabel: string | undefined;
   onChange: (patch: Partial<PostFilters>) => void;
 }
@@ -50,13 +36,12 @@ export function PostFiltersBar({
   filters,
   categories,
   canFilterAuthor,
-  isAdmin,
   authorLabel,
   onChange,
 }: Props) {
   const [q, setQ] = useState(filters.q);
   const pushed = useRef(filters.q);
-  const authors = useAuthors(isAdmin);
+  const authors = useAuthors(canFilterAuthor);
 
   // Debounce typing into the URL.
   useEffect(() => {
@@ -152,7 +137,7 @@ export function PostFiltersBar({
         </NativeSelect>
       </Field>
 
-      {isAdmin && (
+      {canFilterAuthor && (
         <Field label="Author" id="filter-author">
           <NativeSelect
             id="filter-author"
@@ -170,18 +155,6 @@ export function PostFiltersBar({
             ))}
           </NativeSelect>
         </Field>
-      )}
-
-      {canFilterAuthor && !isAdmin && filters.author && (
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          onClick={() => onChange({ author: undefined })}
-          aria-label={`Remove author filter: ${authorLabel ?? "selected author"}`}
-        >
-          Author: {authorLabel ?? "selected"} <X aria-hidden />
-        </Button>
       )}
 
       {active && (

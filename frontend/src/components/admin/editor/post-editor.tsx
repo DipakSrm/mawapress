@@ -37,7 +37,9 @@ import {
 import { ApiError } from "@/lib/api";
 import { useSession } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import { FeaturedImageField, type MediaPickRequest } from "./featured-image-field";
+import { MediaPicker } from "@/components/admin/media/media-picker";
+import { mediaAlt, mediaArticleUrl, type MediaOut } from "@/lib/admin/media";
+import { FeaturedImageField } from "./featured-image-field";
 import { ImportDocxDialog } from "./import-docx-dialog";
 import { LanguageTabs, PANEL_ID, type TabState } from "./language-tabs";
 import { LeaveGuard } from "./leave-guard";
@@ -104,12 +106,10 @@ function absolute(url: string | null | undefined, origin: string): string | null
 export interface PostEditorProps {
   /** The post to edit, or null for a new one (created on the first save). */
   initial: PostOut | null;
-  /** Task 6 passes the media library picker here; until then the field shows a placeholder. */
-  onRequestMedia?: MediaPickRequest;
 }
 
 /** The writing screen: language tabs, title and body, the side panels, autosave and the workflow bar. */
-export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
+export function PostEditor({ initial }: PostEditorProps) {
   const queryClient = useQueryClient();
   const { user, hasRole } = useSession();
   const isEditor = hasRole("editor");
@@ -122,6 +122,10 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  // The media picker serves two callers; this says who asked and what to do with the choice.
+  const [picker, setPicker] = useState<{ title: string; pick: (media: MediaOut) => void } | null>(
+    null,
+  );
 
   const initialLocale: Locale = initial
     ? initial.translations.some((t) => t.locale === "ne")
@@ -166,6 +170,19 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
       setContent(locale, json);
     },
     [setContent, getDraft, locale],
+  );
+  const requestInlineImage = useCallback(
+    (insert: (image: { src: string; alt?: string; caption?: string }) => void) =>
+      setPicker({
+        title: "Insert an image",
+        pick: (media) =>
+          insert({
+            src: mediaArticleUrl(media),
+            alt: mediaAlt(media, locale),
+            caption: media.caption ?? undefined,
+          }),
+      }),
+    [locale],
   );
   const onEditorReady = useCallback((e: Editor) => {
     editorRef.current = e;
@@ -407,6 +424,7 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
                   locale={locale}
                   readOnly={!canEdit}
                   onEditorReady={onEditorReady}
+                  onRequestImage={requestInlineImage}
                   aria-label={`${NAME[locale]} article body`}
                 />
               </>
@@ -467,7 +485,12 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
             <FeaturedImageField
               media={draft.shared.featuredMedia}
               onChange={(featuredMedia) => ed.updateShared({ featuredMedia })}
-              onRequestPick={onRequestMedia}
+              onRequestPick={() =>
+                setPicker({
+                  title: "Choose the featured image",
+                  pick: (featuredMedia) => ed.updateShared({ featuredMedia }),
+                })
+              }
               disabled={!canEdit}
             />
           </Section>
@@ -572,6 +595,16 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
         </aside>
       </div>
 
+      {picker && (
+        <MediaPicker
+          title={picker.title}
+          onClose={() => setPicker(null)}
+          onSelect={(media) => {
+            picker.pick(media);
+            setPicker(null);
+          }}
+        />
+      )}
       {scheduleOpen && post && (
         <ScheduleDialog
           post={post}

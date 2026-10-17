@@ -2,7 +2,7 @@
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ChevronLeft, ChevronRight, Loader2, RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { RichEditor } from "@/components/editor/RichEditor";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
+import { useAuthors } from "@/lib/admin/authors";
 import type { Locale } from "@/lib/admin/editor/seo";
 import { formatDateTime, timeAgo } from "@/lib/admin/post-display";
 import type { PostOut } from "@/lib/admin/posts";
@@ -41,8 +42,8 @@ interface Props {
   onClose: () => void;
 }
 
-function editorLabel(id: string, viewerId: string) {
-  return id === viewerId ? "You" : "Another editor";
+function editorLabel(id: string, viewerId: string, names: Map<string, string>) {
+  return id === viewerId ? "You" : (names.get(id) ?? "Another editor");
 }
 
 /** Paginated revision history for the open language, a read-only view of one, and restore. */
@@ -61,6 +62,13 @@ export function RevisionsDrawer({
   const [selected, setSelected] = useState<number | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [restoring, setRestoring] = useState(false);
+
+  // Reporters cannot list authors; they see "Another editor".
+  const authors = useAuthors(canRestore);
+  const names = useMemo(
+    () => new Map((authors.data ?? []).map((a) => [a.id, a.name])),
+    [authors.data],
+  );
 
   const list = useQuery({
     queryKey: ["revisions", postId, locale, offset],
@@ -154,7 +162,7 @@ export function RevisionsDrawer({
                             <time dateTime={rev.created_at} title={rev.created_at}>
                               {formatDateTime(rev.created_at)} · {timeAgo(rev.created_at)}
                             </time>{" "}
-                            · {editorLabel(rev.editor_id, viewerId)} ·{" "}
+                            · {editorLabel(rev.editor_id, viewerId, names)} ·{" "}
                             {NAME[rev.locale] ?? rev.locale}
                           </span>
                         </button>

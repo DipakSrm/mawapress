@@ -344,39 +344,6 @@ describe("tags and featured image", () => {
     await act(async () => {});
     expect(screen.queryByRole("option", { name: /Create/ })).toBeNull();
   });
-
-  it("shows the placeholder picker for the featured image", async () => {
-    mockSignedIn(editor);
-    server.use(http.get("*/api/categories", () => HttpResponse.json(CATEGORIES)));
-    renderWithSession(<PostEditor initial={post()} />);
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Choose image" }));
-    expect(await screen.findByRole("dialog", { name: "Media library" })).toBeInTheDocument();
-  });
-
-  it("calls the media picker prop and applies the chosen image", async () => {
-    mockSignedIn(editor);
-    server.use(http.get("*/api/categories", () => HttpResponse.json(CATEGORIES)));
-    const media = {
-      id: "11111111-1111-4111-8111-111111111111",
-      url: "/media/a.jpg",
-      width: 1200,
-      height: 630,
-      alt_ne: null,
-      alt_en: "A river",
-      caption: null,
-      variants: {},
-    };
-    renderWithSession(<PostEditor initial={post()} onRequestMedia={(select) => select(media)} />);
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Choose image" }));
-    expect(await screen.findByRole("img", { name: "A river" })).toHaveAttribute(
-      "src",
-      "/media/a.jpg",
-    );
-    await user.click(screen.getByRole("button", { name: "Remove" }));
-    expect(screen.queryByRole("img", { name: "A river" })).toBeNull();
-  });
 });
 
 describe("leave guard", () => {

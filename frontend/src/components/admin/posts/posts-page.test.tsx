@@ -76,7 +76,9 @@ function mockApi(user: TestUser, rows: Row[], total = rows.length): Api {
   const seen: Api = { lists: [], calls: [] };
   server.use(
     http.get("*/api/categories", () => HttpResponse.json(CATEGORIES)),
-    http.get("*/api/users", () => HttpResponse.json([{ ...reporter, is_active: true }])),
+    http.get("*/api/users/authors", () =>
+      HttpResponse.json([{ id: reporter.id, name: reporter.name }]),
+    ),
     http.get("*/api/posts", ({ request }) => {
       const url = new URL(request.url);
       seen.lists.push(url);
@@ -267,13 +269,14 @@ describe("posts list", () => {
     );
     await waitFor(() => expect(lastUrl()).toBe("/admin/posts?author=u-rep"));
     await waitFor(() => expect(seen.lists.at(-1)?.searchParams.get("author_id")).toBe("u-rep"));
-    expect(
-      await screen.findByRole("button", { name: "Remove author filter: Rita Reporter" }),
-    ).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Author")).toHaveValue("u-rep"));
   });
 
-  it("gives admins an author select", async () => {
-    const seen = mockApi(admin, [post("a", "draft")]);
+  it.each([
+    ["editors", editor],
+    ["admins", admin],
+  ])("gives %s an author select fed by the authors endpoint", async (_name, user) => {
+    const seen = mockApi(user, [post("a", "draft")]);
     renderPage();
     await screen.findByText("Title a");
     await screen.findByRole("option", { name: "Rita Reporter" });

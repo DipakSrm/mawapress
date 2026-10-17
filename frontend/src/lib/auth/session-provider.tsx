@@ -34,6 +34,8 @@ interface SessionContextValue {
   role: Role | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** Replace the cached profile after the user edits it (name, bio). */
+  updateUser: (user: SessionUser) => void;
   /** Re-run the session restore after a status of `error`. */
   retry: () => void;
   hasRole: (min: Role) => boolean;
@@ -152,6 +154,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [clear]);
 
+  const updateUser = useCallback((next: SessionUser) => setUser(next), []);
+
   const value = useMemo<SessionContextValue>(
     () => ({
       status,
@@ -159,10 +163,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       role: user?.role ?? null,
       login,
       logout,
+      updateUser,
       retry,
       hasRole: (min) => roleAtLeast(user?.role, min),
     }),
-    [status, user, login, logout, retry],
+    [status, user, login, logout, updateUser, retry],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

@@ -56,7 +56,6 @@ export function PostsPage() {
   const searchParams = useSearchParams();
   const { user, hasRole } = useSession();
   const isEditor = hasRole("editor");
-  const isAdmin = hasRole("admin");
 
   const filters = useMemo(() => parseFilters(searchParams), [searchParams]);
   const list = usePostList(filters);
@@ -113,7 +112,6 @@ export function PostsPage() {
         filters={filters}
         categories={categories.data}
         canFilterAuthor={isEditor}
-        isAdmin={isAdmin}
         authorLabel={authorLabel}
         onChange={update}
       />
