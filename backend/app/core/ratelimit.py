@@ -52,14 +52,26 @@ async def enforce(redis: Redis, key: str, limit: int) -> None:
         )
 
 
+def _valid_ip(value: str) -> str | None:
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        return None
+
+
 def client_ip(request: Request) -> str:
-    if get_settings().trust_proxy:
-        forwarded = request.headers.get("x-forwarded-for", "")
-        first = forwarded.split(",")[0].strip()
-        try:
-            return str(ipaddress.ip_address(first))
-        except ValueError:
-            pass  # missing or malformed: fall back to the socket peer
+    """The caller's IP. Behind a trusted proxy: the configured header (CF-Connecting-IP by default) if it holds
+    a valid IP, else the right-most valid X-Forwarded-For entry (the hop our own proxy appended; anything to its
+    left is client-supplied and spoofable), else the socket peer."""
+    settings = get_settings()
+    if settings.trust_proxy:
+        direct = _valid_ip(request.headers.get(settings.client_ip_header, ""))
+        if direct is not None:
+            return direct
+        for entry in reversed(request.headers.get("x-forwarded-for", "").split(",")):
+            ip = _valid_ip(entry)
+            if ip is not None:
+                return ip
     return request.client.host if request.client else "unknown"
 
 

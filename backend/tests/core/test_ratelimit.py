@@ -58,8 +58,8 @@ async def test_forwarded_for_ignored_unless_trusted(client, monkeypatch):
     monkeypatch.setattr(get_settings(), "trust_proxy", True)
     assert (await attempt(client, email="z@mawapress.com", headers={"X-Forwarded-For": "7.7.7.7"})).status_code == 401
     for _ in range(5):
-        await attempt(client, headers={"X-Forwarded-For": "8.8.8.8, 10.0.0.2"})
-    assert (await attempt(client, headers={"X-Forwarded-For": "8.8.8.8, 10.0.0.9"})).status_code == 429
+        await attempt(client, headers={"X-Forwarded-For": "6.6.6.6, 8.8.8.8"})
+    assert (await attempt(client, headers={"X-Forwarded-For": "5.5.5.5, 8.8.8.8"})).status_code == 429
     assert (await attempt(client, headers={"X-Forwarded-For": "7.7.7.7"})).status_code == 401
 
 
@@ -99,3 +99,50 @@ async def test_valid_ipv6_forwarded_for_is_used(client, monkeypatch):
         await attempt(client, headers={"X-Forwarded-For": "2001:db8::1"})
     assert (await attempt(client, headers={"X-Forwarded-For": "2001:db8::1"})).status_code == 429
     assert (await attempt(client, headers={"X-Forwarded-For": "2001:db8::2"})).status_code == 401
+
+
+async def test_spoofed_leftmost_forwarded_for_entry_is_ignored(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "trust_proxy", True)
+    for i in range(5):  # the client rotates the left-most entry; our proxy appended 8.8.8.8
+        await attempt(client, headers={"X-Forwarded-For": f"1.1.1.{i}, 8.8.8.8"})
+    assert (await attempt(client, headers={"X-Forwarded-For": "1.1.1.99, 8.8.8.8"})).status_code == 429
+
+
+async def test_rightmost_valid_forwarded_for_entry_skips_junk_tail(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "trust_proxy", True)
+    for _ in range(5):
+        await attempt(client, headers={"X-Forwarded-For": "8.8.8.8, garbage"})
+    assert (await attempt(client, headers={"X-Forwarded-For": "2.2.2.2, 8.8.8.8, junk"})).status_code == 429
+
+
+async def test_cf_connecting_ip_is_preferred_when_trusted(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "trust_proxy", True)
+    for i in range(5):
+        await attempt(client, headers={"CF-Connecting-IP": "203.0.113.7", "X-Forwarded-For": f"9.9.9.{i}"})
+    blocked = await attempt(client, headers={"CF-Connecting-IP": "203.0.113.7", "X-Forwarded-For": "9.9.9.200"})
+    assert blocked.status_code == 429
+    assert (await attempt(client, headers={"CF-Connecting-IP": "203.0.113.8"})).status_code == 401
+
+
+async def test_cf_connecting_ip_ignored_unless_trusted(client):
+    for i in range(5):
+        await attempt(client, headers={"CF-Connecting-IP": f"203.0.113.{i}"})
+    assert (await attempt(client, headers={"CF-Connecting-IP": "203.0.113.99"})).status_code == 429
+
+
+async def test_invalid_cf_connecting_ip_falls_back_to_forwarded_for_then_peer(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "trust_proxy", True)
+    for _ in range(5):
+        await attempt(client, headers={"CF-Connecting-IP": "nope", "X-Forwarded-For": "8.8.8.8"})
+    assert (await attempt(client, headers={"CF-Connecting-IP": "bad", "X-Forwarded-For": "8.8.8.8"})).status_code == 429
+    for _ in range(5):  # nothing usable at all: the socket peer
+        await attempt(client, email="q@mawapress.com", headers={"CF-Connecting-IP": "nope", "X-Forwarded-For": "zzz"})
+    assert (await attempt(client, email="q@mawapress.com")).status_code == 429
+
+
+async def test_client_ip_header_is_configurable(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "trust_proxy", True)
+    monkeypatch.setattr(get_settings(), "client_ip_header", "X-Real-IP")
+    for _ in range(5):
+        await attempt(client, headers={"X-Real-IP": "203.0.113.50", "CF-Connecting-IP": "1.2.3.4"})
+    assert (await attempt(client, headers={"X-Real-IP": "203.0.113.50"})).status_code == 429

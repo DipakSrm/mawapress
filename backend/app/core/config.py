@@ -1,3 +1,4 @@
+import logging
 from functools import lru_cache
 
 from pydantic import model_validator
@@ -5,6 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_JWT_SECRET = "dev-only-change-me-this-is-not-a-real-secret"
 MIN_JWT_SECRET_LENGTH = 32
+
+log = logging.getLogger("mawa.config")
 
 
 class Settings(BaseSettings):
@@ -18,7 +21,8 @@ class Settings(BaseSettings):
     site_url: str = "https://mawapress.com"
     refresh_days: int = 14
     cookie_secure: bool = True  # set MAWA_COOKIE_SECURE=false for plain-http local dev
-    trust_proxy: bool = False  # honour X-Forwarded-For (only behind a proxy that sets it)
+    trust_proxy: bool = False  # honour client_ip_header / X-Forwarded-For (only behind a proxy that sets them)
+    client_ip_header: str = "CF-Connecting-IP"  # preferred client-IP header when trust_proxy is on
     rate_limit_window_seconds: int = 60
     stats_salt: str | None = None  # secret for the daily view-dedup salt; falls back to jwt_secret
     # Outbox worker integrations; each is skipped (event still marked processed) while unset.
@@ -55,6 +59,24 @@ class Settings(BaseSettings):
         return self
 
 
+    def startup_warnings(self) -> list[str]:
+        warnings = []
+        if self.env != "dev" and not self.trust_proxy:
+            warnings.append(
+                "MAWA_TRUST_PROXY is false: every client shares the proxy's IP for rate limiting and view dedup. "
+                "Set it to true when running behind Nginx/Cloudflare."
+            )
+        if self.env != "dev" and self.storage == "local":
+            warnings.append(
+                "MAWA_STORAGE=local: uploads live on this machine's disk and are served by the API. "
+                "Use MAWA_STORAGE=s3 in production."
+            )
+        return warnings
+
+
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    for message in settings.startup_warnings():
+        log.warning(message)
+    return settings
