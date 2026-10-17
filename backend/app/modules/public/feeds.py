@@ -41,6 +41,12 @@ def public_image(locale: str, media: Media | None, title: str) -> PublicImage | 
     )
 
 
+def visible(locale: str | None = None) -> list:
+    """The one public-visibility rule: a published translation of a published post (optionally one locale)."""
+    rules = [PostTranslation.status == TranslationStatus.published, Post.status == PostStatus.published]
+    return rules if locale is None else [PostTranslation.locale == locale, *rules]
+
+
 def card_query(locale: str) -> Select:
     alt_col = Media.alt_ne if locale == "ne" else Media.alt_en
     return (
@@ -65,11 +71,7 @@ def card_query(locale: str) -> Select:
         .join(Category, Category.id == Post.category_id)
         .join(User, User.id == Post.author_id)
         .outerjoin(Media, Media.id == Post.featured_media_id)
-        .where(
-            PostTranslation.locale == locale,
-            PostTranslation.status == TranslationStatus.published,
-            Post.status == PostStatus.published,
-        )
+        .where(*visible(locale))
     )
 
 

@@ -85,7 +85,7 @@ async def test_success_marks_processed_and_sends_revalidation(session):
     assert str(reval.url) == "https://web.test/api/revalidate"
     assert reval.headers["x-revalidate-secret"] == "s3cret"
     assert rec.body(0) == {
-        "tags": ["post:00000000-0000-0000-0000-0000000000a1", "home", "category:morang", "search"],
+        "tags": ["post:00000000-0000-0000-0000-0000000000a1", "home", "category:morang", "search", "feeds"],
         "paths": ["/en/morang/en-slug", "/ne/morang/ne-slug"],
     }
 
@@ -297,7 +297,7 @@ async def test_old_category_gets_revalidated_too(session):
     }
     await add_event(session, "post.updated", payload)
     rec = await run(session)
-    assert rec.body(0)["tags"] == ["post:p1", "home", "category:sports", "category:morang", "search"]
+    assert rec.body(0)["tags"] == ["post:p1", "home", "category:sports", "category:morang", "search", "feeds"]
 
 
 async def test_empty_secret_with_url_is_skipped_and_processed(session, caplog):

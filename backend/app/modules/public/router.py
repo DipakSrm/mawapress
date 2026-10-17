@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import get_redis
+from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.ratelimit import limit_search
 from app.db.session import get_session
@@ -18,6 +19,9 @@ from app.modules.posts.models import Post, PostStatus, PostTranslation, Translat
 from app.modules.public.service import (
     CACHE_CONTROL,
     CACHE_TTL_SECONDS,
+    XML_CACHE_CONTROL,
+    XML_CACHE_TTL_SECONDS,
+    xml_cache_key,
     NEGATIVE_TTL_SECONDS,
     NOT_FOUND_MARKER,
     cache_get,
@@ -33,6 +37,7 @@ from app.modules.public.service import (
 )
 from app.modules.public.feeds import category_feed, home_feed, public_image
 from app.modules.public.schemas import CardPage, CategoryFeedOut, HomeOut, PublicImage
+from app.modules.public import xmlfeeds
 from app.modules.public.search import search_posts
 from app.modules.seo import service as seo_service
 from app.modules.taxonomy import service as taxonomy_service
@@ -271,3 +276,86 @@ async def resolve_redirect(
     await cache_set(redis, key, out.model_dump_json())
     response.headers["X-Cache"] = "MISS"
     return out
+
+
+async def _cached_xml(
+    redis: Redis, name: str, media_type: str, build: Callable[[], Awaitable[str]]
+) -> Response:
+    """Serve an XML document from Redis under the current feed generation, or build and store it."""
+    headers = {"Cache-Control": XML_CACHE_CONTROL}
+    gen = await feed_generation(redis)
+    key = xml_cache_key(gen, name) if gen is not None else None
+    cached = await cache_get(redis, key) if key else None
+    if cached is not None:
+        return Response(cached, media_type=media_type, headers={**headers, "X-Cache": "HIT"})
+    body = await build()
+    if key:
+        await cache_set(redis, key, body, ttl=XML_CACHE_TTL_SECONDS)
+    return Response(body, media_type=media_type, headers={**headers, "X-Cache": "MISS"})
+
+
+def _site() -> str:
+    return get_settings().site_url.rstrip("/")
+
+
+@router.get("/sitemap.xml")
+async def sitemap_index(
+    session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)
+) -> Response:
+    return await _cached_xml(redis, "index", "application/xml", lambda: xmlfeeds.sitemap_index(session, _site()))
+
+
+@router.get("/sitemaps/categories.xml")
+async def categories_sitemap(
+    session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)
+) -> Response:
+    return await _cached_xml(
+        redis, "categories", "application/xml", lambda: xmlfeeds.categories_sitemap(session, _site())
+    )
+
+
+@router.get("/sitemaps/posts-{month}.xml")
+async def posts_sitemap(
+    month: str, session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)
+) -> Response:
+    window = xmlfeeds.parse_month(month)  # only real YYYY-MM values may become cache keys
+    if window is None:
+        raise AppError(404, "SITEMAP_NOT_FOUND", "No such sitemap")
+    return await _cached_xml(
+        redis, f"posts:{month}", "application/xml", lambda: xmlfeeds.month_sitemap(session, _site(), *window)
+    )
+
+
+@router.get("/news-sitemap.xml")
+async def news_sitemap(
+    session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis)
+) -> Response:
+    return await _cached_xml(redis, "news", "application/xml", lambda: xmlfeeds.news_sitemap(session, _site()))
+
+
+@router.get("/rss.xml")
+async def rss(
+    locale: str = Query(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Response:
+    _require_locale(locale)
+    return await _cached_xml(
+        redis, f"rss:{locale}", "application/rss+xml", lambda: xmlfeeds.rss_feed(session, _site(), locale, None)
+    )
+
+
+@router.get("/category/{slug}/rss.xml")
+async def category_rss(
+    slug: str,
+    locale: str = Query(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Response:
+    _require_locale(locale)
+    return await _cached_xml(
+        redis,
+        f"rss:{locale}:{slug}",
+        "application/rss+xml",
+        lambda: xmlfeeds.rss_feed(session, _site(), locale, slug),
+    )

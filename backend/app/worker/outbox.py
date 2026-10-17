@@ -69,7 +69,7 @@ async def resolve_targets(session, payload: dict) -> Targets:
     old = await session.get(Category, old_id) if old_id is not None else None
     if old is not None:
         tags.append(f"category:{old.slug}")
-    tags.append("search")
+    tags += ["search", "feeds"]  # feeds: sitemaps and RSS, which the web app proxies
     redirects = list(payload.get("redirects") or [])
     if payload.get("redirect"):
         redirects.append(payload["redirect"])
