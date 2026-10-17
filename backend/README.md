@@ -50,21 +50,85 @@ Docker must be running. The suite includes migration upgrade, downgrade and mode
 
 ## Configuration
 
-All settings are read from `MAWA_*` environment variables or `.env`; see `.env.example`. Outside `dev`, `MAWA_JWT_SECRET` must be at least 32 random characters or the app refuses to start.
+All settings are read from `MAWA_*` environment variables or `.env`; `.env.example` lists every one. Outside `dev`, `MAWA_JWT_SECRET` must be at least 32 random characters and `MAWA_COOKIE_SECURE` must be `true`, or the app refuses to start. Outside `dev` the app also logs a startup warning when `MAWA_TRUST_PROXY=false` or `MAWA_STORAGE=local` (both are legitimate for a direct, single-host deployment, so neither is refused).
 
-Session and rate-limit settings:
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `MAWA_ENV` | `dev` | `dev` relaxes the secret, cookie and warning checks. |
+| `MAWA_DATABASE_URL` | local Postgres | SQLAlchemy asyncpg URL. |
+| `MAWA_REDIS_URL` | `redis://localhost:6379/0` | Cache, rate limits, view counters, worker queue. |
+| `MAWA_JWT_SECRET` | dev placeholder | Signs access tokens; 32+ chars outside dev. |
+| `MAWA_JWT_ACCESS_MINUTES` | `15` | Access-token lifetime. |
+| `MAWA_SITE_URL` | `https://mawapress.com` | Canonical origin for SEO, sitemaps, RSS and CDN purge URLs. |
+| `MAWA_REFRESH_DAYS` | `14` | Refresh-token cookie lifetime. |
+| `MAWA_COOKIE_SECURE` | `true` | `Secure` flag on auth cookies; `false` only for plain-http local dev. |
+| `MAWA_TRUST_PROXY` | `false` | Trust proxy headers for the client IP (see below). |
+| `MAWA_CLIENT_IP_HEADER` | `CF-Connecting-IP` | Preferred client-IP header when `MAWA_TRUST_PROXY=true`. |
+| `MAWA_RATE_LIMIT_WINDOW_SECONDS` | `60` | Fixed window for the per-IP limits: login 5 per IP+email and 20 per IP, search 30 per IP, view count 60 per IP. Failed logins are also capped at 20 per account (hashed email) per hour, whatever the IP; the 21st attempt gets 429 even with the right password. |
+| `MAWA_STATS_SALT` | unset | Secret for the daily view-dedup salt; falls back to `MAWA_JWT_SECRET`. |
+| `MAWA_STORAGE` | `local` | `local` (disk, served by the API at `/media`) or `s3` (R2/S3). |
+| `MAWA_MEDIA_LOCAL_DIR` | `.media` | Directory for local storage. |
+| `MAWA_MEDIA_BASE_URL` | empty | Public origin that serves media; required for `s3`. |
+| `MAWA_S3_ENDPOINT`, `MAWA_S3_BUCKET`, `MAWA_S3_ACCESS_KEY`, `MAWA_S3_SECRET_KEY` | unset | Required when `MAWA_STORAGE=s3`. |
+| `MAWA_REVALIDATE_URL`, `MAWA_REVALIDATE_SECRET` | unset | Next.js revalidation route and shared secret. |
+| `MAWA_CF_ZONE_ID`, `MAWA_CF_API_TOKEN` | unset | Cloudflare cache purge. |
 
-- `MAWA_REFRESH_DAYS` (default `14`): lifetime of the refresh-token cookie.
-- `MAWA_COOKIE_SECURE` (default `true`): sets the `Secure` flag on auth cookies. Set it to `false` for plain-http local development; the shipped `.env.example` does this. The app refuses to start with `false` when `MAWA_ENV` is not `dev`.
-- `MAWA_TRUST_PROXY` (default `false`): use the first `X-Forwarded-For` entry as the client IP for rate limiting. Enable only behind a proxy that overwrites the header with the real client address rather than appending to it; only the first entry is used, and it is ignored (falling back to the socket peer) unless it is a valid IP address.
-- `MAWA_RATE_LIMIT_WINDOW_SECONDS` (default `60`): window for the login (5 per IP+email, 20 per IP) and public search (30 per IP) limits.
+### Behind Cloudflare and Nginx
+
+Rate limits and view de-duplication need the real client IP. With `MAWA_TRUST_PROXY=true` the client IP is, in order:
+
+1. the header named by `MAWA_CLIENT_IP_HEADER` (default `CF-Connecting-IP`, which Cloudflare sets) if it is a valid IP;
+2. the right-most valid `X-Forwarded-For` entry, which is the hop your own proxy appended (entries to its left are client-supplied and can be spoofed, so the first entry is never used);
+3. the socket peer.
+
+Only enable it when the API is reachable exclusively through your proxy; otherwise a client can send these headers itself. A typical Cloudflare, then Nginx, then uvicorn setup:
+
+```nginx
+# Trust Cloudflare's edge addresses (refresh from https://www.cloudflare.com/ips/) so $remote_addr is the visitor.
+include /etc/nginx/cloudflare-ips.conf;   # lines of: set_real_ip_from <cidr>;
+real_ip_header CF-Connecting-IP;
+real_ip_recursive on;
+
+location /api/ {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;   # must reach the API
+    proxy_set_header X-Forwarded-For $remote_addr;              # overwrite, never append client input
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Block direct access to the origin from anywhere but Cloudflare (firewall or Cloudflare Authenticated Origin Pulls). Without a proxy, leave `MAWA_TRUST_PROXY=false`.
 
 ## Background worker
 
-The outbox worker (arq, backed by Redis) drains the `outbox` table every 10 seconds: it calls the Next.js revalidation route and purges the Cloudflare cache for published, updated and unpublished articles. Failed events retry with exponential backoff (20 s, 40 s, 80 s, ...) and are dead-lettered after 5 attempts. A daily job also deletes refresh tokens that expired or were revoked more than 7 days ago.
+One arq worker (backed by Redis) runs the background jobs. Start it next to the API:
 
 ```bash
 python -m uv run arq app.worker.settings.WorkerSettings
 ```
 
-Settings (all optional; an unset integration is skipped and the event is still marked processed): `MAWA_REVALIDATE_URL`, `MAWA_REVALIDATE_SECRET`, `MAWA_CF_ZONE_ID`, `MAWA_CF_API_TOKEN`. Admins can inspect failed events with `GET /api/admin/jobs?state=dead|pending` and requeue one with `POST /api/admin/jobs/{id}/retry`.
+| Job | Trigger | What it does |
+| --- | --- | --- |
+| `process_outbox` | cron, every 10 s | Claims `outbox` rows and calls the Next.js revalidation route and the Cloudflare purge (article, redirect, category and home pages, plus the listing pages, `sitemap.xml`, `news-sitemap.xml`, `rss.xml` and category RSS they affect; purge batches of 30). Failures retry with exponential backoff (20 s, 40 s, ... capped at 1 h) and are dead-lettered after 10 attempts. A Redis lock (`lock:outbox`, lease 120 s) makes a tick exit at once if the previous run is still going. |
+| `publish_due_posts` | cron, every 30 s | Publishes scheduled posts whose time has come (published time = the scheduled time, or "now" if more than 5 minutes late). A failing post backs off 2^n minutes (max 60) and is left scheduled after 10 failures; the error is visible as `schedule_last_error` on the post. |
+| `flush_views` | cron, every 60 s | Drains the Redis view counters into `posts.view_count`. |
+| `make_variants` | enqueued on media upload | Generates the responsive image variants and the 1200x630 social image. |
+| `refresh_seo_for(kind, id)` | enqueued after a category rename (`category`) or an author rename (`user`) | Re-runs the stored SEO of every affected post in batches of 100 and, for published posts, emits `post.updated` and drops their caches. |
+| `purge_refresh_tokens` | cron, daily 03:17 | Deletes refresh tokens that expired or were revoked more than 7 days ago. |
+
+Admins can inspect outbox events with `GET /api/admin/jobs?state=dead|pending`, requeue one with `POST /api/admin/jobs/{id}/retry`, or requeue every dead event with `POST /api/admin/jobs/retry-dead` (returns `{"requeued": n}`). An unset integration is skipped and the event is still marked processed.
+
+## API overview
+
+The OpenAPI schema is served at `/openapi.json` (interactive docs at `/docs`). `docs/api-contract.md` is the contract for the admin app and the public site. Endpoint groups:
+
+- **Auth** (`/api/auth`): login, refresh (cookie + CSRF), logout, `me` (read and update profile or password). Users: `/api/users` (admin).
+- **Posts** (`/api/posts`): CRUD with `If-Match`, submit, publish (also from scheduled), schedule, unschedule, send back, unpublish, unarchive, per-translation publish, revisions and restore. Categories and tags: `/api/categories`, `/api/tags`.
+- **Media** (`/api/media`): upload (JPEG, PNG, WebP, GIF up to 10 MB), list, patch alt text and caption, delete.
+- **Import** (`/api/import/docx`): `.docx` upload to a draft post.
+- **Admin jobs** (`/api/admin/jobs`): outbox inspection and retry.
+- **Public read API** (`/api/public`): posts, home, category feeds, category tree, search, redirect resolution, trending.
+- **Sitemaps and RSS** (`/api/public`): `sitemap.xml`, `sitemaps/categories.xml`, `sitemaps/posts-YYYY-MM.xml`, `news-sitemap.xml`, `rss.xml?locale=`, `category/{slug}/rss.xml?locale=`.
+- **Stats** (`/api/public/stats/view`, `/api/public/trending`): view counting and trending.
+- Health: `GET /api/healthz`.
