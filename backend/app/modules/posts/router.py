@@ -38,6 +38,7 @@ def _summary(post: Post, author_name: str) -> PostSummary:
         category_id=post.category_id,
         author_id=post.author_id,
         author_name=author_name,
+        view_count=post.view_count,
         updated_at=post.updated_at,
         published_at=post.published_at,
         scheduled_at=post.scheduled_at,

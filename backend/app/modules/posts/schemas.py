@@ -64,6 +64,7 @@ class PostOut(BaseModel):
     id: uuid.UUID
     status: PostStatus
     is_breaking: bool
+    view_count: int
     author_id: uuid.UUID
     category_id: int
     featured_media_id: uuid.UUID | None
@@ -92,6 +93,7 @@ class PostSummary(BaseModel):
     category_id: int
     author_id: uuid.UUID
     author_name: str
+    view_count: int
     updated_at: datetime
     published_at: datetime | None
     scheduled_at: datetime | None

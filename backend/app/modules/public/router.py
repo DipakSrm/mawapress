@@ -1,19 +1,23 @@
+import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TypeVar
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
+from typing import Literal
+
 from pydantic import BaseModel, TypeAdapter
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import get_redis
 from app.core.config import get_settings
 from app.core.errors import AppError
-from app.core.ratelimit import limit_search
+from app.core.ratelimit import client_ip, limit_search, limit_view
 from app.db.session import get_session
 from app.modules.posts.models import Post, PostStatus, PostTranslation, TranslationStatus
 from app.modules.public.service import (
@@ -36,8 +40,9 @@ from app.modules.public.service import (
     redirect_cache_key,
 )
 from app.modules.public.feeds import category_feed, home_feed, public_image
-from app.modules.public.schemas import CardPage, CategoryFeedOut, HomeOut, PublicImage
+from app.modules.public.schemas import CardPage, CategoryFeedOut, HomeOut, PublicCard, PublicImage
 from app.modules.public import xmlfeeds
+from app.modules.public import stats
 from app.modules.public.search import search_posts
 from app.modules.seo import service as seo_service
 from app.modules.taxonomy import service as taxonomy_service
@@ -46,6 +51,8 @@ from app.modules.taxonomy.schemas import CategoryNode
 from app.modules.users.models import User
 
 router = APIRouter(prefix="/api/public", tags=["public"])
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_LOCALES = ("ne", "en")
 POST_SLUG_PATTERN = re.compile(r"[a-z0-9-]{1,100}")  # anything else cannot exist; never cache its 404
@@ -359,3 +366,54 @@ async def category_rss(
         "application/rss+xml",
         lambda: xmlfeeds.rss_feed(session, _site(), locale, slug),
     )
+
+
+class ViewIn(BaseModel):
+    post_id: uuid.UUID
+    locale: Literal["ne", "en"]
+
+
+@router.post("/stats/view", status_code=204)
+async def count_view(
+    body: ViewIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    _: None = Depends(limit_view),
+) -> Response:
+    """Always 204, so the endpoint never reveals whether a post exists or whether the view counted."""
+    if await stats.is_countable(session, body.post_id, body.locale):
+        try:
+            await stats.record_view(redis, body.post_id, body.locale, client_ip(request))
+        except RedisError:
+            logger.warning("View not counted; Redis unavailable", exc_info=True)
+    return Response(status_code=204)
+
+
+_cards = TypeAdapter(list[PublicCard])
+
+
+@router.get("/trending", response_model=list[PublicCard])
+async def public_trending(
+    response: Response,
+    locale: str = Query(),
+    limit: int = Query(default=10, ge=1, le=20),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> list[PublicCard]:
+    _require_locale(locale)
+    response.headers["Cache-Control"] = CACHE_CONTROL
+    key = stats.trending_cache_key(locale, limit)
+    cached = await cached_model(redis, key, list[PublicCard])
+    if cached is not None:
+        response.headers["X-Cache"] = "HIT"
+        return cached
+    try:
+        out = await stats.top_by_redis(session, redis, locale, limit)
+    except RedisError:
+        logger.warning("Trending unavailable from Redis; falling back to view_count", exc_info=True)
+        response.headers["X-Cache"] = "BYPASS"
+        return await stats.top_by_view_count(session, locale, limit)
+    await cache_set(redis, key, _cards.dump_json(out).decode())
+    response.headers["X-Cache"] = "MISS"
+    return out

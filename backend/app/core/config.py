@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     cookie_secure: bool = True  # set MAWA_COOKIE_SECURE=false for plain-http local dev
     trust_proxy: bool = False  # honour X-Forwarded-For (only behind a proxy that sets it)
     rate_limit_window_seconds: int = 60
+    stats_salt: str | None = None  # secret for the daily view-dedup salt; falls back to jwt_secret
     # Outbox worker integrations; each is skipped (event still marked processed) while unset.
     revalidate_url: str | None = None
     revalidate_secret: str | None = None

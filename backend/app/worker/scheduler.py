@@ -19,8 +19,8 @@ PROCESS_BUDGET_SECONDS = 20  # stop starting new posts after this; the rest wait
 
 
 async def publish_due_posts(ctx: dict) -> int:
-    """Cron entry point. ctx carries `session_factory` and `redis`. Returns how many posts were published."""
-    factory, redis = ctx["session_factory"], ctx["redis"]
+    """Cron entry point. ctx carries `session_factory` and `cache_redis`. Returns how many posts were published."""
+    factory, redis = ctx["session_factory"], ctx["cache_redis"]
     async with factory() as session:
         ids = await service.due_post_ids(session, BATCH_SIZE)
     deadline = time.monotonic() + PROCESS_BUDGET_SECONDS

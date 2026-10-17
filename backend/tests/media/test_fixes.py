@@ -21,7 +21,7 @@ def ctx_for(session, storage, redis=None) -> dict:
     async def factory():
         yield session
 
-    return {"session_factory": factory, "storage": storage, "redis": redis}
+    return {"session_factory": factory, "storage": storage, "cache_redis": redis}
 
 
 async def upload(mclient, user, data):

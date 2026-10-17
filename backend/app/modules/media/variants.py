@@ -19,7 +19,7 @@ def variant_key(original_key: str, name: str) -> str:
 
 
 async def make_variants(ctx: dict, media_id: str) -> None:
-    """ctx carries `session_factory`, `storage` and (optionally) `redis`.
+    """ctx carries `session_factory`, `storage` and (optionally) `cache_redis`.
 
     No database transaction is open while Pillow or storage work runs. Safe to re-run; a media row
     deleted meanwhile is skipped (and its freshly written variant files are removed).
@@ -57,7 +57,7 @@ async def make_variants(ctx: dict, media_id: str) -> None:
             except Exception:
                 log.warning("could not delete orphaned variant %s", key, exc_info=True)
         return
-    redis = ctx.get("redis")
+    redis = ctx.get("cache_redis")
     if redis is not None:
         for post in live:
             await invalidate_public(redis, post)

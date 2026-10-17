@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 LOGIN_PER_IP_EMAIL = 5
 LOGIN_PER_IP = 20
 SEARCH_PER_IP = 30
+VIEW_PER_IP = 60
 
 
 async def hit(redis: Redis, key: str, limit: int, window_seconds: int) -> bool:
@@ -68,3 +69,7 @@ def digest(value: str) -> str:
 
 async def limit_search(request: Request, redis: Redis = Depends(get_redis)) -> None:
     await enforce(redis, f"rl:search:{client_ip(request)}", SEARCH_PER_IP)
+
+
+async def limit_view(request: Request, redis: Redis = Depends(get_redis)) -> None:
+    await enforce(redis, f"rl:view:{client_ip(request)}", VIEW_PER_IP)

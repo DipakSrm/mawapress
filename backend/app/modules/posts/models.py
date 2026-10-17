@@ -64,6 +64,7 @@ class Post(Base):
     )
     featured_media_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("media.id", ondelete="SET NULL"))
     is_breaking: Mapped[bool] = mapped_column(default=False, server_default=false())
+    view_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())

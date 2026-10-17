@@ -28,7 +28,7 @@ def make_ctx(session, redis) -> dict:
             await session.rollback()
             raise
 
-    return {"session_factory": factory, "redis": redis}
+    return {"session_factory": factory, "cache_redis": redis}
 
 
 async def scheduled_post(client, session, *, due: bool, title="बाढी समाचार", cat=None, extra_locale=False):
@@ -139,7 +139,7 @@ async def test_skip_locked_under_concurrency(engine, fake_redis):
         async with AsyncSession(engine, expire_on_commit=False) as fresh:
             yield fresh
 
-    ctx = {"session_factory": factory, "redis": fake_redis}
+    ctx = {"session_factory": factory, "cache_redis": fake_redis}
     try:
         holder = AsyncSession(engine)
         await holder.execute(select(Post).where(Post.id == post_id).with_for_update())
