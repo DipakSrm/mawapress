@@ -8,15 +8,22 @@ from app.db.session import get_session
 from app.modules.auth.deps import require_role
 from app.modules.users import service
 from app.modules.users.models import Role, User
-from app.modules.users.schemas import PasswordSet, UserCreate, UserOut, UserUpdate
+from app.modules.users.schemas import AuthorOut, PasswordSet, UserCreate, UserOut, UserUpdate
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 admins = require_role(Role.admin)
+editors = require_role(Role.editor)
 
 
 @router.get("", response_model=list[UserOut])
 async def list_users(admin: User = Depends(admins), session: AsyncSession = Depends(get_session)) -> list[User]:
     return await service.list_users(session)
+
+
+@router.get("/authors", response_model=list[AuthorOut])
+async def list_authors(editor: User = Depends(editors), session: AsyncSession = Depends(get_session)) -> list[User]:
+    """Id and name of active users, for author filters and revision display (editors can't see full user records)."""
+    return await service.list_authors(session)
 
 
 @router.post("", response_model=UserOut, status_code=201)

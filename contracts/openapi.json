@@ -1,6 +1,25 @@
 {
   "components": {
     "schemas": {
+      "AuthorOut": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "AuthorOut",
+        "type": "object"
+      },
       "Body_import_docx_api_import_docx_post": {
         "properties": {
           "category_id": {
@@ -5083,6 +5102,37 @@
           }
         ],
         "summary": "Create User",
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/api/users/authors": {
+      "get": {
+        "description": "Id and name of active users, for author filters and revision display (editors can't see full user records).",
+        "operationId": "list_authors_api_users_authors_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AuthorOut"
+                  },
+                  "title": "Response List Authors Api Users Authors Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Authors",
         "tags": [
           "users"
         ]

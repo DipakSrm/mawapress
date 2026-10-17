@@ -23,6 +23,10 @@ async def list_users(session: AsyncSession) -> list[User]:
     return list((await session.scalars(select(User).order_by(User.created_at, User.id))).all())
 
 
+async def list_authors(session: AsyncSession) -> list[User]:
+    return list((await session.scalars(select(User).where(User.is_active.is_(True)).order_by(User.name, User.id))).all())
+
+
 async def get_user(session: AsyncSession, user_id: uuid.UUID) -> User:
     user = await session.get(User, user_id)
     if user is None:

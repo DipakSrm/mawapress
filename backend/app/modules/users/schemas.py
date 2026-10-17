@@ -23,6 +23,13 @@ class UserOut(BaseModel):
     created_at: datetime
 
 
+class AuthorOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+
+
 class UserCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
