@@ -38,7 +38,12 @@ async def test_self_password_change_revokes_everything(client, session):
         "/api/auth/me", json={"current_password": PASSWORD, "new_password": "brand-new-pass-2"}, headers=headers
     )
     assert r.status_code == 200
-    await assert_all_dead(client, session, headers, user)
+    # Every pre-existing session is dead; only the fresh one issued in the response survives.
+    assert (await client.get("/api/auth/me", headers=headers)).status_code == 401
+    rows = (await session.scalars(select(RefreshToken).where(RefreshToken.user_id == user.id))).all()
+    assert len(rows) == 2 and sorted(row.revoked_at is None for row in rows) == [False, True]
+    fresh = {"Authorization": f"Bearer {r.json()['access_token']}"}
+    assert (await client.get("/api/auth/me", headers=fresh)).status_code == 200
 
 
 async def test_admin_password_reset_revokes_everything(client, session):

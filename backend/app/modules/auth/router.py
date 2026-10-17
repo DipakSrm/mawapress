@@ -45,6 +45,10 @@ class MeOut(BaseModel):
     bio: str | None
 
 
+class MeUpdateOut(MeOut):
+    access_token: str | None = None  # present only after a password change
+
+
 def _set_session_cookies(response: Response, refresh_token: str) -> None:
     settings = get_settings()
     max_age = settings.refresh_days * 86400
@@ -132,8 +136,18 @@ async def me(user: User = Depends(current_user)) -> User:
     return user
 
 
-@router.patch("/me", response_model=MeOut)
+@router.patch("/me", response_model=MeUpdateOut)
 async def update_me(
-    body: MeUpdate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
-) -> User:
-    return await users_service.update_me(session, user, body)
+    body: MeUpdate,
+    response: Response,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> MeUpdateOut:
+    """A password change revokes every session; this one is replaced with a fresh token family
+    (new refresh and CSRF cookies, new access token in the body) so the caller stays signed in."""
+    user = await users_service.update_me(session, user, body)
+    out = MeUpdateOut.model_validate(user)
+    if body.new_password is not None:
+        _set_session_cookies(response, await service.issue_refresh_token(session, user))
+        out.access_token = create_access_token(user.id, user.role.value, user.token_version)
+    return out
