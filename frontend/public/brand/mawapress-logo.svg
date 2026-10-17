@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" role="img" aria-label="MAWAPRESS — Voice of Morang">
+  <g transform="translate(32 32) scale(0.5)">
+    <rect x="12" y="12" width="488" height="488" rx="104" fill="#C8102E" stroke="#003893" stroke-width="24"/>
+    <circle cx="404" cy="124" r="38" fill="#FFD166"/>
+    <path d="M100 352 L178 168 L256 292 L334 168 L412 352" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linejoin="round" stroke-linecap="round"/>
+    <line x1="92" y1="406" x2="420" y2="406" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round" opacity="0.9"/>
+  </g>
+  <text x="320" y="196" font-family="Inter, 'Segoe UI', Arial, sans-serif" font-size="136" font-weight="800" letter-spacing="-3" fill="#111827">MAWA<tspan fill="#C8102E">PRESS</tspan></text>
+  <rect x="324" y="222" width="72" height="6" rx="3" fill="#003893"/>
+  <text x="412" y="234" font-family="Mukta, 'Noto Sans Devanagari', 'Nirmala UI', sans-serif" font-size="38" font-weight="600" fill="#4B5563">मोरङको आवाज · VOICE OF MORANG</text>
+</svg>

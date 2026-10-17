@@ -19,8 +19,8 @@ any_staff = require_role(Role.reporter)
 @router.post("/docx", response_model=ImportOut, status_code=201)
 async def import_docx(
     file: UploadFile = File(),
-    locale: Annotated[Locale, Form()] = ...,
-    category_id: Annotated[int, Form()] = ...,
+    locale: Locale = Form(),
+    category_id: int = Form(),
     title: Annotated[str | None, Form(max_length=service.MAX_TITLE)] = None,
     user: User = Depends(any_staff),
     session: AsyncSession = Depends(get_session),

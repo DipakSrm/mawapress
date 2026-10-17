@@ -1,3 +1,5 @@
+import uuid
+
 from app.modules.users.models import Role
 from tests.factories import auth_header, auth_if_match, make_category, make_user
 
@@ -68,8 +70,8 @@ async def test_items_are_compact_summaries(client, session):
     await create(client, alice, cat)
     item = (await list_posts(client, alice))["items"][0]
     assert set(item) == {
-        "id", "status", "category_id", "author_id", "author_name", "view_count", "updated_at", "published_at", "scheduled_at",
-        "translations",
+        "id", "status", "category_id", "author_id", "author_name", "view_count", "created_at", "updated_at", "published_at", "scheduled_at",
+        "feedback_note", "feedback_by_name", "feedback_at", "translations",
     }
     assert item["author_name"] == "Alice Rai"
     assert item["translations"] == [
@@ -156,3 +158,50 @@ async def test_list_requires_login(client):
     r = await client.get("/api/posts")
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "NOT_AUTHENTICATED"
+
+
+async def test_published_at_range_filters(client, session):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from app.modules.posts.models import Post
+
+    alice = await make_user(session)
+    editor = await make_user(session, role=Role.editor)
+    cat = await make_category(session)
+    now = datetime.now(UTC)
+    ages = {"old": timedelta(days=3), "mid": timedelta(hours=10), "new": timedelta(hours=1)}
+    made = {}
+    for key, age in ages.items():
+        post = await create(client, alice, cat, title=f"Story {key}", locale="en")
+        live = await client.post(f"/api/posts/{post['id']}/publish", headers=auth_if_match(editor, post["updated_at"]))
+        assert live.status_code == 200
+        made[key] = post["id"]
+        await session.execute(update(Post).where(Post.id == uuid.UUID(post["id"])).values(published_at=now - age))
+    await create(client, alice, cat, title="Still a draft", locale="en")  # published_at is NULL
+    await session.commit()
+
+    cutoff = (now - timedelta(hours=24)).isoformat()
+    last_day = await list_posts(client, editor, published_after=cutoff)
+    assert set(ids(last_day)) == {made["mid"], made["new"]} and last_day["total"] == 2
+
+    before = await list_posts(client, editor, published_before=cutoff)
+    assert ids(before) == [made["old"]]
+
+    window = await list_posts(
+        client, editor, published_after=(now - timedelta(days=5)).isoformat(), published_before=(now - timedelta(hours=5)).isoformat()
+    )
+    assert set(ids(window)) == {made["old"], made["mid"]}
+
+    # a post published exactly at the boundary: after is inclusive, before is exclusive
+    boundary = now - timedelta(hours=10)
+    assert made["mid"] in ids(await list_posts(client, editor, published_after=boundary.isoformat()))
+    assert made["mid"] not in ids(await list_posts(client, editor, published_before=boundary.isoformat()))
+
+
+async def test_published_range_rejects_naive_datetimes(client, session):
+    editor = await make_user(session, role=Role.editor)
+    for name in ("published_after", "published_before"):
+        r = await client.get("/api/posts", params={name: "2026-01-01T00:00:00"}, headers=auth_header(editor))
+        assert r.status_code == 422

@@ -142,3 +142,19 @@ async def test_demoting_one_of_two_admins_is_allowed_and_revokes_sessions(client
     assert r.status_code == 200
     assert r.json()["role"] == "editor"
     assert second.token_version == 1
+
+
+async def test_authors_endpoint_is_editor_plus_and_minimal(client, session):
+    reporter = await make_user(session, role=Role.reporter, name="Rita")
+    editor = await make_user(session, role=Role.editor, name="Ed")
+    await make_user(session, role=Role.reporter, name="Gone", is_active=False)
+
+    assert (await client.get("/api/users/authors")).status_code == 401
+    assert (await client.get("/api/users/authors", headers=auth_header(reporter))).status_code == 403
+
+    r = await client.get("/api/users/authors", headers=auth_header(editor))
+    assert r.status_code == 200
+    rows = r.json()
+    assert {row["name"] for row in rows} >= {"Rita", "Ed"}
+    assert "Gone" not in {row["name"] for row in rows}
+    assert all(set(row) == {"id", "name"} for row in rows)

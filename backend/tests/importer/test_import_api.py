@@ -53,9 +53,10 @@ async def test_import_builds_draft_with_expected_nodes_and_marks(mclient, sessio
     types = {n["type"] for n in nodes}
     assert {"bulletList", "orderedList", "listItem", "blockquote", "image"} <= types
     texts = " ".join(n["text"] for n in nodes if n["type"] == "text")
-    assert "r0c0 | r0c1" in texts  # table kept as text
+    assert {"table", "tableRow", "tableCell"} <= types
+    assert "r0c0" in texts and "r0c1" in texts  # table cells kept as real table nodes
     warnings = body["report"]["warnings"]
-    assert any("table" in w for w in warnings) and any("link" in w for w in warnings)
+    assert not any("table" in w for w in warnings) and any("link" in w for w in warnings)
     assert body["report"]["images"] == 1
 
 

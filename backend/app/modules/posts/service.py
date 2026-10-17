@@ -505,6 +505,7 @@ async def submit_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> 
     if post.status != PostStatus.draft:
         raise AppError(409, "INVALID_TRANSITION", f"Cannot submit a post that is {post.status.value}")
     post.status = PostStatus.in_review
+    post.feedback_note = post.feedback_at = post.feedback_editor = None  # the reporter has answered the feedback
     post.updated_at = utcnow()
     return await _save(session, post)
 
@@ -693,15 +694,19 @@ async def send_back_post(
     _check_version(post, if_match)
     if post.status != PostStatus.in_review:
         raise AppError(409, "INVALID_TRANSITION", f"Cannot send back a post that is {post.status.value}")
+    note = (note or "").strip() or None
     post.status = PostStatus.draft
-    post.updated_at = utcnow()
+    post.feedback_note = note
+    post.feedback_editor = editor
+    post.feedback_at = utcnow()
+    post.updated_at = post.feedback_at
     session.add(OutboxEvent(
         topic="post.sent_back",
         payload={
             "post_id": str(post.id),
             "author_id": str(post.author_id),
             "editor_id": str(editor.id),
-            "note": (note or "").strip() or None,
+            "note": note,
         },
     ))
     return await _save(session, post)
@@ -732,6 +737,8 @@ async def list_posts(
     category_id: int | None = None,
     locale: str | None = None,
     q: str | None = None,
+    published_after: datetime | None = None,
+    published_before: datetime | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> tuple[list[tuple[Post, str]], int]:
@@ -744,6 +751,10 @@ async def list_posts(
         conditions.append(Post.status == status)
     if category_id is not None:
         conditions.append(Post.category_id == category_id)
+    if published_after is not None:
+        conditions.append(Post.published_at >= published_after)
+    if published_before is not None:
+        conditions.append(Post.published_at < published_before)
 
     translation_conditions = []
     if locale is not None:

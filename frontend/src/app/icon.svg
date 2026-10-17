@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="MAWAPRESS icon">
+  <!-- Gurans-crimson tile with a flag-blue border (nod to Nepal's flag) -->
+  <rect x="12" y="12" width="488" height="488" rx="104" fill="#C8102E" stroke="#003893" stroke-width="24"/>
+  <!-- Rising sun: news breaking over Morang -->
+  <circle cx="404" cy="124" r="38" fill="#FFD166"/>
+  <!-- Himalayan peaks forming the "M" -->
+  <path d="M100 352 L178 168 L256 292 L334 168 L412 352" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linejoin="round" stroke-linecap="round"/>
+  <!-- Flat Terai horizon of Morang -->
+  <line x1="92" y1="406" x2="420" y2="406" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round" opacity="0.9"/>
+</svg>

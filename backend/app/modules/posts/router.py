@@ -2,6 +2,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Path, Query
+from pydantic import AwareDatetime
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,9 +42,13 @@ def _summary(post: Post, author_name: str) -> PostSummary:
         author_id=post.author_id,
         author_name=author_name,
         view_count=post.view_count,
+        created_at=post.created_at,
         updated_at=post.updated_at,
         published_at=post.published_at,
         scheduled_at=post.scheduled_at,
+        feedback_note=post.feedback_note,
+        feedback_by_name=post.feedback_by_name,
+        feedback_at=post.feedback_at,
         translations=[TranslationSummary.model_validate(t) for t in post.translations],
     )
 
@@ -60,6 +65,8 @@ async def list_posts(
     category_id: int | None = None,
     locale: Locale | None = None,
     q: str | None = Query(default=None, max_length=200),
+    published_after: AwareDatetime | None = None,
+    published_before: AwareDatetime | None = None,
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(any_staff),
@@ -68,6 +75,7 @@ async def list_posts(
     posts, total = await service.list_posts(
         session, user,
         status=status, author_id=author_id, category_id=category_id, locale=locale, q=q,
+        published_after=published_after, published_before=published_before,
         limit=limit, offset=offset,
     )
     return PostListOut(

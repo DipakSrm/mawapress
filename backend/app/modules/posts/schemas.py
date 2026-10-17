@@ -73,6 +73,11 @@ class PostOut(BaseModel):
     scheduled_at: datetime | None
     schedule_attempts: int
     schedule_last_error: str | None
+    feedback_note: str | None
+    feedback_by: uuid.UUID | None
+    feedback_by_name: str | None
+    feedback_at: datetime | None
+    created_at: datetime
     updated_at: datetime
     translations: list[TranslationOut]
     tags: list[TagOut]
@@ -96,9 +101,13 @@ class PostSummary(BaseModel):
     author_id: uuid.UUID
     author_name: str
     view_count: int
+    created_at: datetime
     updated_at: datetime
     published_at: datetime | None
     scheduled_at: datetime | None
+    feedback_note: str | None
+    feedback_by_name: str | None
+    feedback_at: datetime | None
     translations: list[TranslationSummary]
 
 
