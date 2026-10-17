@@ -16,6 +16,8 @@ LOGIN_PER_IP_EMAIL = 5
 LOGIN_PER_IP = 20
 SEARCH_PER_IP = 30
 VIEW_PER_IP = 60
+LOGIN_FAILURES_PER_ACCOUNT = 20
+ACCOUNT_WINDOW_SECONDS = 3600
 
 
 async def hit(redis: Redis, key: str, limit: int, window_seconds: int) -> bool:
@@ -57,6 +59,30 @@ def _valid_ip(value: str) -> str | None:
         return str(ipaddress.ip_address(value.strip()))
     except ValueError:
         return None
+
+
+def account_key(email: str) -> str:
+    return f"rl:login-acct:{digest(email.strip().lower())}"
+
+
+async def enforce_account_not_capped(redis: Redis, email: str) -> None:
+    """429 while this email has had LOGIN_FAILURES_PER_ACCOUNT failed logins in the last hour, whatever the IP."""
+    key = account_key(email)
+    try:
+        failures = int(await redis.get(key) or 0)
+    except RedisError:
+        logger.warning("Account login cap unavailable, allowing request", exc_info=True)
+        return
+    if failures >= LOGIN_FAILURES_PER_ACCOUNT:
+        retry = await _retry_after(redis, key, ACCOUNT_WINDOW_SECONDS)
+        raise AppError(
+            429, "RATE_LIMITED", "Too many failed sign-ins for this account, try again later",
+            headers={"Retry-After": str(retry)},
+        )
+
+
+async def record_failed_login(redis: Redis, email: str) -> None:
+    await hit(redis, account_key(email), LOGIN_FAILURES_PER_ACCOUNT, ACCOUNT_WINDOW_SECONDS)  # fails open
 
 
 def client_ip(request: Request) -> str:

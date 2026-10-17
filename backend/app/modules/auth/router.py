@@ -80,15 +80,23 @@ async def login_rate_limit(
     ip = ratelimit.client_ip(request)
     await ratelimit.enforce(redis, f"rl:login:{ip}:{ratelimit.digest(body.email.lower())}", ratelimit.LOGIN_PER_IP_EMAIL)
     await ratelimit.enforce(redis, f"rl:login-ip:{ip}", ratelimit.LOGIN_PER_IP)
+    await ratelimit.enforce_account_not_capped(redis, body.email)
 
 
 @router.post("/login", response_model=TokenOut, dependencies=[Depends(login_rate_limit)])
-async def login(body: LoginIn, response: Response, session: AsyncSession = Depends(get_session)) -> TokenOut:
+async def login(
+    body: LoginIn,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> TokenOut:
     user = await session.scalar(select(User).where(User.email == body.email.lower()))
     if user is None or not user.is_active:
         verify_password(body.password, DUMMY_PASSWORD_HASH)  # same cost as a real check
+        await ratelimit.record_failed_login(redis, body.email)
         raise AppError(401, "INVALID_CREDENTIALS", "Email or password is incorrect")
     if not verify_password(body.password, user.password_hash):
+        await ratelimit.record_failed_login(redis, body.email)
         raise AppError(401, "INVALID_CREDENTIALS", "Email or password is incorrect")
     _set_session_cookies(response, await service.issue_refresh_token(session, user))
     return TokenOut(access_token=create_access_token(user.id, user.role.value, user.token_version))

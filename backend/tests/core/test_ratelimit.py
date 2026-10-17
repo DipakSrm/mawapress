@@ -146,3 +146,30 @@ async def test_client_ip_header_is_configurable(client, monkeypatch):
     for _ in range(5):
         await attempt(client, headers={"X-Real-IP": "203.0.113.50", "CF-Connecting-IP": "1.2.3.4"})
     assert (await attempt(client, headers={"X-Real-IP": "203.0.113.50"})).status_code == 429
+
+
+async def test_account_is_capped_at_20_failed_logins_an_hour_across_ips(client, session, monkeypatch):
+    monkeypatch.setattr(get_settings(), "trust_proxy", True)
+    await make_user(session, email="victim@mawapress.com", password="right-pass-1")
+    for i in range(ratelimit.LOGIN_FAILURES_PER_ACCOUNT):  # a distributed guesser: a fresh IP every time
+        r = await attempt(client, email="victim@mawapress.com", headers={"X-Forwarded-For": f"10.1.0.{i}"})
+        assert r.status_code == 401, i
+    blocked = await attempt(client, email="victim@mawapress.com", headers={"X-Forwarded-For": "10.1.1.1"})
+    assert blocked.status_code == 429 and blocked.json()["error"]["code"] == "RATE_LIMITED"
+    assert 3000 < int(blocked.headers["Retry-After"]) <= 3600
+    # even the right password is refused while the account is capped
+    right = await client.post(
+        "/api/auth/login", json={"email": "victim@mawapress.com", "password": "right-pass-1"},
+        headers={"X-Forwarded-For": "10.1.1.2"},
+    )
+    assert right.status_code == 429
+    # other accounts are unaffected
+    assert (await attempt(client, email="other@mawapress.com", headers={"X-Forwarded-For": "10.1.1.3"})).status_code == 401
+
+
+async def test_successful_logins_do_not_count_toward_the_account_cap(client, session, fake_redis):
+    await make_user(session, email="ok@mawapress.com", password="right-pass-1")
+    for _ in range(3):
+        r = await client.post("/api/auth/login", json={"email": "ok@mawapress.com", "password": "right-pass-1"})
+        assert r.status_code == 200
+    assert await fake_redis.get(f"rl:login-acct:{ratelimit.digest('ok@mawapress.com')}") is None
