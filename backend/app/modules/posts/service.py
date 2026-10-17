@@ -248,7 +248,6 @@ async def update_post(
         raise AppError(409, "SLUG_TAKEN", "That slug is already used by another article in this language")
 
     now = utcnow()
-    public_changed = False
     # Readers have seen a published translation, so keep its current state before changing it.
     before = _snapshot(tr) if tr is not None and tr.status == TranslationStatus.published else None
     if tr is None:
@@ -278,8 +277,6 @@ async def update_post(
         tr = new_tr
         post.translations.append(tr)
     else:
-        # Only an already-published translation of a live post is visible to readers.
-        public_changed = post.status == PostStatus.published and tr.status == TranslationStatus.published
         changed = False
         retitle_draft = False
         if data.title is not None and data.title != tr.title:
@@ -336,16 +333,20 @@ async def update_post(
         slug_change = SlugChange(tr.locale, old_slug, paths)
         redirect = {"from": old_path, "to": new_path}
 
-    if data.is_breaking is not None and data.is_breaking != post.is_breaking:
+    breaking_changed = data.is_breaking is not None and data.is_breaking != post.is_breaking
+    if breaking_changed:
         post.is_breaking = data.is_breaking
-        if post.status == PostStatus.published:
-            public_changed = True  # the home page's breaking strip changes
     if tags is not None:
         post.tags = tags
     post.updated_at = now
 
-    if before is not None and _snapshot(tr) != before:
+    # `before` exists only for an already-published translation, and the snapshot covers every
+    # public field of it, so one comparison drives both the revision and the public side.
+    translation_changed = before is not None and _snapshot(tr) != before
+    if translation_changed:
         session.add(PostRevision(post_id=post.id, locale=tr.locale, editor_id=user.id, **before))
+    # Tags are not public yet. The breaking flag shows on the home page whichever translation is edited.
+    public_changed = post.status == PostStatus.published and (translation_changed or breaking_changed)
     if public_changed:
         event = _post_event("post.updated", post)
         if redirect is not None:
