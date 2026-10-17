@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from app.modules.media.schemas import MediaOut
 from app.modules.posts.models import PostStatus, TranslationStatus
 from app.modules.taxonomy.schemas import TagOut
 
@@ -16,6 +17,7 @@ class PostCreate(BaseModel):
     content_json: dict
     category_id: int
     tag_ids: list[int] = Field(default_factory=list, max_length=20)
+    featured_media_id: uuid.UUID | None = None
 
 
 class SendBackIn(BaseModel):
@@ -37,6 +39,7 @@ class PostUpdate(BaseModel):
     is_breaking: bool | None = None  # editor+ only
     slug: str | None = None  # length checked in the service (INVALID_SLUG); editor+, published translations only; writes a 301
     category_id: int | None = None  # moves the post; published translations get a 301 from their old path
+    featured_media_id: uuid.UUID | None = None  # omitted = unchanged, null = clear
 
 
 class TranslationOut(BaseModel):
@@ -63,6 +66,8 @@ class PostOut(BaseModel):
     is_breaking: bool
     author_id: uuid.UUID
     category_id: int
+    featured_media_id: uuid.UUID | None
+    featured_media: MediaOut | None
     published_at: datetime | None
     scheduled_at: datetime | None
     updated_at: datetime

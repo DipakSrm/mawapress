@@ -13,6 +13,7 @@ from app.core.errors import AppError
 from app.db.base import utcnow
 from app.db.outbox import OutboxEvent
 from app.modules.auth.deps import ROLE_RANK
+from app.modules.media.models import Media
 from app.modules.posts.models import Post, PostRevision, PostStatus, PostTranslation, TranslationStatus
 from app.modules.posts.render import render_html
 from app.modules.posts.schemas import PostCreate, PostUpdate
@@ -78,6 +79,13 @@ def _post_event(topic: str, post: Post) -> OutboxEvent:
     )
 
 
+def _og_image_url(media: Media | None, site_url: str) -> str | None:
+    if media is None:
+        return None
+    url = media.variants.get("og") or media.url
+    return f"{site_url}{url}" if url.startswith("/") else url  # social crawlers need an absolute URL
+
+
 async def _refresh_all_seo(session: AsyncSession, post: Post) -> None:
     category = await session.get(Category, post.category_id)
     author = await session.get(User, post.author_id)
@@ -99,6 +107,7 @@ async def _refresh_all_seo(session: AsyncSession, post: Post) -> None:
                 author_name=author.name,
                 published_at=tr.published_at or post.published_at,
                 modified_at=tr.updated_at,
+                image_url=_og_image_url(post.featured_media, site_url),
                 seo_title=tr.seo_title,
                 seo_description=tr.seo_description,
                 alternate_slugs=alternates,
@@ -158,9 +167,19 @@ async def _flush_with_slug_retry(
     raise AppError(409, "SLUG_TAKEN", "Could not allocate a unique slug; please retry")
 
 
+async def _get_featured_media(session: AsyncSession, media_id: uuid.UUID | None) -> Media | None:
+    if media_id is None:
+        return None
+    media = await session.get(Media, media_id)
+    if media is None:
+        raise AppError(422, "MEDIA_NOT_FOUND", "Featured image does not exist")
+    return media
+
+
 async def create_post(session: AsyncSession, author: User, data: PostCreate) -> Post:
     if await session.get(Category, data.category_id) is None:
         raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
+    featured = await _get_featured_media(session, data.featured_media_id)
     tags = await taxonomy_service.get_tags(session, data.tag_ids)
     base = make_slug(data.title)
     content_html = render_html(data.content_json)
@@ -169,7 +188,10 @@ async def create_post(session: AsyncSession, author: User, data: PostCreate) -> 
 
     async def assign() -> None:
         nonlocal post
-        post = Post(author_id=author.id, category_id=data.category_id, status=PostStatus.draft, tags=list(tags))
+        post = Post(
+            author_id=author.id, category_id=data.category_id, status=PostStatus.draft, tags=list(tags),
+            featured_media=featured,
+        )
         post.translations.append(
             PostTranslation(
                 locale=data.locale,
@@ -213,7 +235,7 @@ def _snapshot(tr: PostTranslation) -> dict:
 
 class UpdateResult(NamedTuple):
     post: Post
-    public_changed: bool  # True when readers can see the change (live translation edited, or breaking flag on a live post)
+    public_changed: bool  # True when readers can see the change (live translation edited, or breaking flag / featured image on a live post)
     slug_changes: Sequence[SlugChange] = ()  # one per translation whose public path moved and got a redirect
 
 
@@ -247,6 +269,8 @@ async def update_post(
         if new_category is None:
             raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
     tags = await taxonomy_service.get_tags(session, data.tag_ids) if data.tag_ids is not None else None
+    featured_requested = "featured_media_id" in data.model_fields_set
+    new_featured = await _get_featured_media(session, data.featured_media_id) if featured_requested else None
 
     tr = next((t for t in post.translations if t.locale == data.locale), None)
     new_slug = _requested_slug(user, tr, data.slug) if data.slug is not None else None
@@ -362,6 +386,9 @@ async def update_post(
     breaking_changed = data.is_breaking is not None and data.is_breaking != post.is_breaking
     if breaking_changed:
         post.is_breaking = data.is_breaking
+    featured_changed = featured_requested and data.featured_media_id != post.featured_media_id
+    if featured_changed:
+        post.featured_media = new_featured
     if tags is not None:
         post.tags = tags
     post.updated_at = now
@@ -371,9 +398,9 @@ async def update_post(
     translation_changed = before is not None and _snapshot(tr) != before
     if translation_changed:
         session.add(PostRevision(post_id=post.id, locale=tr.locale, editor_id=user.id, **before))
-    # Tags are not public yet. The breaking flag shows on the home page whichever translation is edited.
+    # Tags are not public yet. The breaking flag and the featured image show on cards whichever translation is edited.
     public_changed = post.status == PostStatus.published and (
-        translation_changed or breaking_changed or category_moved_publicly
+        translation_changed or breaking_changed or category_moved_publicly or featured_changed
     )
     if public_changed:
         event = _post_event("post.updated", post)

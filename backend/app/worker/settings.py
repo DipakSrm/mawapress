@@ -7,7 +7,9 @@ from arq import cron
 from arq.connections import RedisSettings
 
 from app.core.config import get_settings
+from app.core.storage import get_storage
 from app.db.session import SessionLocal, engine
+from app.modules.media.variants import make_variants
 from app.worker.maintenance import purge_refresh_tokens
 from app.worker.scheduler import SCHEDULER_TIMEOUT_SECONDS, publish_due_posts
 from app.worker.outbox import CRON_TIMEOUT_SECONDS, new_http_client, process_outbox
@@ -17,6 +19,7 @@ async def startup(ctx: dict) -> None:
     ctx["session_factory"] = SessionLocal
     ctx["settings"] = get_settings()
     ctx["http"] = new_http_client()
+    ctx["storage"] = get_storage()
 
 
 async def shutdown(ctx: dict) -> None:
@@ -25,7 +28,7 @@ async def shutdown(ctx: dict) -> None:
 
 
 class WorkerSettings:
-    functions: list = []
+    functions: list = [make_variants]
     cron_jobs = [
         # Ticks may overlap (unique only dedupes the same tick); the outbox lease makes that safe.
         cron(process_outbox, second=set(range(0, 60, 10)), run_at_startup=True, timeout=CRON_TIMEOUT_SECONDS),

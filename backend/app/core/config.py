@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     revalidate_secret: str | None = None
     cf_zone_id: str | None = None
     cf_api_token: str | None = None
+    # Media storage: "local" (dev/tests; served by FastAPI at /media) or "s3" (Cloudflare R2).
+    storage: str = "local"
+    media_local_dir: str = ".media"
+    media_base_url: str = ""  # public origin of the s3 bucket/CDN; empty = same-origin relative URLs
+    s3_endpoint: str | None = None
+    s3_bucket: str | None = None
+    s3_access_key: str | None = None
+    s3_secret_key: str | None = None
 
     @model_validator(mode="after")
     def _require_safe_settings_outside_dev(self) -> "Settings":

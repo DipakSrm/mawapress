@@ -31,8 +31,8 @@ from app.modules.public.service import (
     post_cache_key,
     redirect_cache_key,
 )
-from app.modules.public.feeds import category_feed, home_feed
-from app.modules.public.schemas import CardPage, CategoryFeedOut, HomeOut
+from app.modules.public.feeds import category_feed, home_feed, public_image
+from app.modules.public.schemas import CardPage, CategoryFeedOut, HomeOut, PublicImage
 from app.modules.public.search import search_posts
 from app.modules.seo import service as seo_service
 from app.modules.taxonomy import service as taxonomy_service
@@ -91,6 +91,7 @@ class PublicPostOut(BaseModel):
     updated_at: datetime
     seo: dict
     alternates: dict[str, str]
+    image: PublicImage | None = None
 
 
 class RedirectOut(BaseModel):
@@ -156,6 +157,7 @@ async def get_public_post(
             for t in post.translations
             if t.locale != tr.locale and t.status == TranslationStatus.published
         },
+        image=public_image(locale, post.featured_media, tr.title),
     )
     await cache_set(redis, key, out.model_dump_json())
     response.headers["X-Cache"] = "MISS"

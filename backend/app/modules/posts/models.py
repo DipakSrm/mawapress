@@ -24,6 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, utcnow
 
 if TYPE_CHECKING:
+    from app.modules.media.models import Media
     from app.modules.taxonomy.models import Tag
 
 
@@ -60,6 +61,7 @@ class Post(Base):
     status: Mapped[PostStatus] = mapped_column(
         Enum(PostStatus, name="post_status"), default=PostStatus.draft, server_default=PostStatus.draft.value
     )
+    featured_media_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("media.id", ondelete="SET NULL"))
     is_breaking: Mapped[bool] = mapped_column(default=False, server_default=false())
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -70,6 +72,7 @@ class Post(Base):
         back_populates="post", lazy="selectin", cascade="all, delete-orphan", order_by="PostTranslation.id"
     )
     tags: Mapped[list["Tag"]] = relationship(secondary="post_tags", lazy="selectin", order_by="Tag.id")
+    featured_media: Mapped["Media | None"] = relationship(lazy="selectin")
 
 
 class PostTranslation(Base):
