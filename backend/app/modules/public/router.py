@@ -41,6 +41,7 @@ from app.modules.users.models import User
 router = APIRouter(prefix="/api/public", tags=["public"])
 
 SUPPORTED_LOCALES = ("ne", "en")
+MAX_OFFSET = 1000  # deep pages are expensive and nobody reads them
 _category_tree = TypeAdapter(list[CategoryNode])  # dumping only; reads go through cached_model
 
 
@@ -184,7 +185,7 @@ async def public_search(
     q: str = Query(max_length=200),
     locale: str = Query(),
     limit: int = Query(default=20, ge=1, le=50),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
     session: AsyncSession = Depends(get_session),
 ) -> CardPage:
     _require_locale(locale)
@@ -215,7 +216,7 @@ async def public_category(
     response: Response,
     locale: str = Query(),
     limit: int = Query(default=20, ge=1, le=50),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=MAX_OFFSET),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> CategoryFeedOut:

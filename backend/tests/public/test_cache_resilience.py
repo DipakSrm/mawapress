@@ -42,3 +42,10 @@ async def test_old_shape_redirect_entry_is_a_cache_miss(client, fake_redis):
     await fake_redis.set(redirect_cache_key("/ne/a/b"), OLD_SHAPE)
     r = await client.get("/api/public/redirects/resolve", params={"path": "/ne/a/b"})
     assert r.status_code == 404  # no redirect row: answered from the database, not a 500
+
+
+async def test_offset_is_capped_on_search_and_category_feed(client, session):
+    assert (await client.get("/api/public/search", params={"q": "flood", "locale": "ne", "offset": 1001})).status_code == 422
+    assert (await client.get("/api/public/category/morang", params={"locale": "ne", "offset": 1001})).status_code == 422
+    ok = await client.get("/api/public/search", params={"q": "flood", "locale": "ne", "offset": 1000})
+    assert ok.status_code == 200
