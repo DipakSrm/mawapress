@@ -7,9 +7,11 @@ import { toast } from "sonner";
 import { api, ifMatch, isApiError } from "@/lib/api";
 import {
   acknowledge,
+  applyStored,
   clearStoredDraft,
   draftFromPost,
   mergeDrafts,
+  mergeStored,
   emptyDraft,
   emptyLocaleDraft,
   LOCALES,
@@ -49,6 +51,8 @@ export interface ConflictState {
 
 export interface RestoreOffer {
   records: StoredDraft[];
+  /** Some copy was saved before the newest server version: restoring merges instead of replacing. */
+  stale: boolean;
 }
 
 interface Options {
@@ -150,10 +154,17 @@ export function usePostEditor({
       const baseFields = base.locales[locale];
       const differs = baseFields ? !sameLocaleDraft(baseFields, fields) : hasAnyField(fields);
       if (differs || (sharedChanged && !wrote && locale === localeRef.current)) {
-        writeStoredDraft(id, { savedAt: Date.now(), locale, fields, shared: cur.shared });
+        writeStoredDraft(userIdRef.current, id, {
+          savedAt: Date.now(),
+          locale,
+          fields,
+          shared: cur.shared,
+          base: baseFields,
+          baseShared: base.shared,
+        });
         wrote = true;
       } else {
-        clearStoredDraft(id, locale);
+        clearStoredDraft(userIdRef.current, id, locale);
       }
     }
   }, []);
@@ -209,21 +220,29 @@ export function usePostEditor({
 
   /**
    * A create POST that failed in a way that may still have reached the server must not simply be repeated:
-   * that would make a second post. Before the next attempt we look for a post this user created in the
-   * last two minutes with the same title (the API has no idempotency key) and adopt it instead.
+   * that would make a second post. Before the next attempt we look for posts this user created in the
+   * last two minutes (by `created_at`) with the same title (the API has no idempotency key). Exactly one
+   * match is adopted; several matches are ambiguous and nothing is adopted or created.
    */
-  const findRecentDuplicate = useCallback(async (title: string): Promise<PostOut | null> => {
-    const author = userIdRef.current;
-    if (!author) return null;
-    const list = await api.get<{
-      items: { id: string; updated_at: string; translations: { title: string }[] }[];
-    }>("/api/posts", { query: { q: title, author_id: author, limit: 10 } });
-    const recent = Date.now() - 120_000;
-    const hit = list.items.find(
-      (p) => Date.parse(p.updated_at) >= recent && p.translations.some((t) => t.title === title),
-    );
-    return hit ? api.get<PostOut>(`/api/posts/${hit.id}`) : null;
-  }, []);
+  const findRecentDuplicate = useCallback(
+    async (
+      title: string,
+    ): Promise<{ kind: "none" } | { kind: "one"; post: PostOut } | { kind: "ambiguous" }> => {
+      const author = userIdRef.current;
+      if (!author) return { kind: "none" };
+      const list = await api.get<{
+        items: { id: string; created_at: string; translations: { title: string }[] }[];
+      }>("/api/posts", { query: { q: title, author_id: author, limit: 10 } });
+      const recent = Date.now() - 120_000;
+      const hits = list.items.filter(
+        (p) => Date.parse(p.created_at) >= recent && p.translations.some((t) => t.title === title),
+      );
+      if (hits.length === 0) return { kind: "none" };
+      if (hits.length > 1) return { kind: "ambiguous" };
+      return { kind: "one", post: await api.get<PostOut>(`/api/posts/${hits[0].id}`) };
+    },
+    [],
+  );
 
   const runSave = useCallback(
     async (flushAgain: () => Promise<boolean>): Promise<boolean> => {
@@ -244,7 +263,7 @@ export function usePostEditor({
           if (dirtyRef.current) {
             dirtyRef.current = false;
             setDirty(false);
-            clearStoredDraft(idRef.current);
+            clearStoredDraft(userIdRef.current, idRef.current);
           }
           setStatus((s) =>
             s.kind === "idle" || s.kind === "saved" ? s : { kind: "saved", at: Date.now() },
@@ -265,8 +284,20 @@ export function usePostEditor({
             let out: PostOut | null = null;
             let adopted = false;
             if (createUncertain.current === plan.body.title) {
-              out = await findRecentDuplicate(plan.body.title);
-              adopted = out !== null;
+              const found = await findRecentDuplicate(plan.body.title);
+              if (found.kind === "ambiguous") {
+                setStatus({
+                  kind: "error",
+                  message:
+                    "Could not tell whether this post was already created. Check the posts list, then save again.",
+                });
+                writeLocal();
+                return false;
+              }
+              if (found.kind === "one") {
+                out = found.post;
+                adopted = true;
+              }
             }
             out ??= await api.post<PostOut>("/api/posts", plan.body);
             createUncertain.current = null;
@@ -276,7 +307,8 @@ export function usePostEditor({
               title: plan.body.title,
               content: sent.content,
             };
-            clearStoredDraft(null);
+            clearStoredDraft(userIdRef.current, null);
+            clearStoredDraft(userIdRef.current, null, undefined, "kept");
             idRef.current = out.id;
             etagRef.current = out.updated_at;
             baseRef.current = adopted
@@ -447,7 +479,7 @@ export function usePostEditor({
       clearTimeout(timers.current.save);
       timers.current.save = undefined;
       clearRetry();
-      if (!opts.keepStored) clearStoredDraft(out.id);
+      if (!opts.keepStored) clearStoredDraft(userIdRef.current, out.id);
       setPost(out);
       setDirty(false);
       setConflict(null);
@@ -480,9 +512,14 @@ export function usePostEditor({
    * Unsaved copies worth offering. A copy is moved to a separate `kept` key the moment it is offered, so
    * nothing the editor does afterwards (autosave, clean-up, new edits) can overwrite or delete it. Only
    * Restore and Discard remove it. A kept copy that already matches the server is dropped.
+   *
+   * Every copy that differs from the server is offered, even one older than the server version: it is
+   * labelled as such and restoring merges it over the server values. When a kept copy and a newer live
+   * copy both exist for a language they are merged (the newer copy's edits win), so neither is lost.
    */
   function findRestoreOffer(): RestoreOffer | null {
     const id = idRef.current;
+    const user = userIdRef.current;
     const serverTime = postRef.current ? Date.parse(postRef.current.updated_at) : 0;
     const base = baseRef.current;
     const differs = (rec: StoredDraft) => {
@@ -494,19 +531,29 @@ export function usePostEditor({
     };
     const records: StoredDraft[] = [];
     for (const locale of LOCALES) {
-      const kept = readStoredDraft(id, locale, "kept");
-      if (kept) {
-        if (differs(kept)) records.push(kept);
-        else clearStoredDraft(id, locale, "kept");
-        continue;
+      let kept = readStoredDraft(user, id, locale, "kept");
+      if (kept && !differs(kept)) {
+        clearStoredDraft(user, id, locale, "kept");
+        kept = null;
       }
-      const live = readStoredDraft(id, locale);
-      if (!live || live.savedAt <= serverTime || !differs(live)) continue;
-      writeStoredDraft(id, live, "kept");
-      clearStoredDraft(id, locale);
-      records.push(live);
+      const liveRaw = readStoredDraft(user, id, locale);
+      const live = liveRaw && differs(liveRaw) ? liveRaw : null;
+      if (!kept && !live) continue;
+      const record =
+        kept && live
+          ? kept.savedAt <= live.savedAt
+            ? mergeStored(kept, live, base)
+            : mergeStored(live, kept, base)
+          : (kept ?? live)!;
+      if (live) {
+        // Write the kept copy first; only then is the live key released.
+        writeStoredDraft(user, id, record, "kept");
+        clearStoredDraft(user, id, locale);
+      }
+      records.push(record);
     }
-    return records.length ? { records } : null;
+    if (!records.length) return null;
+    return { records, stale: records.some((r) => r.savedAt < serverTime) };
   }
 
   /** Pull the stored copy back into the editor (as unsaved changes). */
@@ -514,28 +561,32 @@ export function usePostEditor({
     if (!restoreOffer) return;
     const records = restoreOffer.records;
     const newest = records.reduce((a, b) => (b.savedAt > a.savedAt ? b : a));
-    const locales = { ...curRef.current.locales };
-    for (const rec of records) locales[rec.locale] = rec.fields;
-    curRef.current = { locales, shared: newest.shared };
+    // The user's own edits win; fields they never touched keep what the editor holds now (the server's values).
+    let next = curRef.current;
+    for (const rec of records) next = applyStored(rec, next, baseRef.current);
+    curRef.current = next;
     localeRef.current = newest.locale;
     setActiveLocaleState(newest.locale);
     setRestoreOffer(null);
     setEpoch((n) => n + 1);
     changed(true, true);
     writeLocal(); // the live copy is back in place before the kept one goes
-    for (const rec of records) clearStoredDraft(idRef.current, rec.locale, "kept");
+    for (const rec of records) {
+      clearStoredDraft(userIdRef.current, idRef.current, rec.locale, "kept");
+    }
   }, [changed, restoreOffer, writeLocal]);
 
   /** Delete the kept copy. The UI asks for confirmation first. */
   const dismissRestore = useCallback(() => {
     setRestoreOffer(null);
-    clearStoredDraft(idRef.current, undefined, "kept");
+    clearStoredDraft(userIdRef.current, idRef.current, undefined, "kept");
   }, []);
 
   useEffect(() => {
-    // Read after mount: localStorage does not exist on the server.
-    setRestoreOffer(findRestoreOfferRef.current());
-  }, []);
+    // Read after mount (localStorage does not exist on the server) and once the user is known, because
+    // copies are scoped to the signed-in user.
+    if (userId) setRestoreOffer(findRestoreOfferRef.current());
+  }, [userId]);
 
   /** The conflict banner's "Load their version": fetch, keep my copy aside, offer to restore it. */
   const loadTheirs = useCallback(async () => {
@@ -610,6 +661,8 @@ export function usePostEditor({
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
       window.removeEventListener("pagehide", onHide);
+      // Leaving the screen inside the debounce window must not lose the last edits.
+      if (t.local) writeLocal();
       for (const key of ["save", "retry", "local", "derive"] as const) clearTimeout(t[key]);
     };
   }, [flush, writeLocal]);

@@ -254,13 +254,28 @@ export interface StoredDraft {
   locale: Locale;
   fields: LocaleDraft;
   shared: SharedDraft;
+  /**
+   * What the editor held as saved when this copy was written. Lets a restore tell the user's own edits
+   * from fields the server changed afterwards. Absent in copies written by older versions.
+   */
+  base?: LocaleDraft;
+  baseShared?: SharedDraft;
 }
 
 type KeyKind = "draft" | "kept";
 
-/** `draft` is the live autosave copy; `kept` is a copy set aside while the user decides to restore or discard it. */
-export const draftKey = (postId: string | null, locale: Locale, kind: KeyKind = "draft") =>
-  `mawapress:${kind}:${postId ?? "new"}:${locale}`;
+/**
+ * `draft` is the live autosave copy; `kept` is a copy set aside while the user decides to restore or
+ * discard it. Keys are scoped to the signed-in user, so two people sharing a browser never see each
+ * other's unsaved work. (Copies written before scoping existed are ignored, not migrated: they cannot
+ * be attributed to a user.)
+ */
+export const draftKey = (
+  userId: string,
+  postId: string | null,
+  locale: Locale,
+  kind: KeyKind = "draft",
+) => `mawapress:${kind}:${userId}:${postId ?? "new"}:${locale}`;
 
 function storage(): Storage | null {
   try {
@@ -271,12 +286,14 @@ function storage(): Storage | null {
 }
 
 export function readStoredDraft(
+  userId: string | undefined,
   postId: string | null,
   locale: Locale,
   kind: KeyKind = "draft",
 ): StoredDraft | null {
+  if (!userId) return null;
   try {
-    const raw = storage()?.getItem(draftKey(postId, locale, kind));
+    const raw = storage()?.getItem(draftKey(userId, postId, locale, kind));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as StoredDraft;
     return parsed && typeof parsed.savedAt === "number" && parsed.fields ? parsed : null;
@@ -286,24 +303,30 @@ export function readStoredDraft(
 }
 
 export function writeStoredDraft(
+  userId: string | undefined,
   postId: string | null,
   record: StoredDraft,
   kind: KeyKind = "draft",
 ): void {
+  if (!userId) return;
   try {
-    storage()?.setItem(draftKey(postId, record.locale, kind), JSON.stringify(record));
+    storage()?.setItem(draftKey(userId, postId, record.locale, kind), JSON.stringify(record));
   } catch {
     // Storage full or blocked: the server copy stays the source of truth.
   }
 }
 
 export function clearStoredDraft(
+  userId: string | undefined,
   postId: string | null,
   locale?: Locale,
   kind: KeyKind = "draft",
 ): void {
+  if (!userId) return;
   try {
-    for (const l of locale ? [locale] : LOCALES) storage()?.removeItem(draftKey(postId, l, kind));
+    for (const l of locale ? [locale] : LOCALES) {
+      storage()?.removeItem(draftKey(userId, postId, l, kind));
+    }
   } catch {
     // ignore
   }
@@ -354,4 +377,50 @@ export function mergeDrafts(oldBase: PostDraft, cur: PostDraft, server: PostDraf
 
 function sameLocaleField(key: (typeof LOCALE_FIELDS)[number], a: LocaleDraft, b: LocaleDraft) {
   return key === "content" ? sameJson(a.content, b.content) : a[key].trim() === b[key].trim();
+}
+
+/**
+ * Merge two stored copies of one language into one: the newer copy's own edits win, everything it did not
+ * touch comes from the older copy. Nothing either copy held is dropped except where both edited the same field.
+ */
+export function mergeStored(
+  older: StoredDraft,
+  newer: StoredDraft,
+  fallbackBase: PostDraft,
+): StoredDraft {
+  const loc = newer.locale;
+  const asDraft = (rec: StoredDraft): PostDraft => ({
+    locales: { [loc]: rec.fields },
+    shared: rec.shared,
+  });
+  const oldBase: PostDraft = {
+    locales: { [loc]: newer.base ?? fallbackBase.locales[loc] },
+    shared: newer.baseShared ?? fallbackBase.shared,
+  };
+  const merged = mergeDrafts(oldBase, asDraft(newer), asDraft(older));
+  return {
+    ...newer,
+    fields: merged.locales[loc] ?? newer.fields,
+    shared: merged.shared,
+    base: older.base ?? newer.base,
+    baseShared: older.baseShared ?? newer.baseShared,
+  };
+}
+
+/**
+ * Lay a stored copy over `target` (what the editor holds now). Fields the user edited (differing from the
+ * base the copy was made against) win; fields they never touched keep the values in `target`, so a
+ * newer server version is not rolled back.
+ */
+export function applyStored(
+  rec: StoredDraft,
+  target: PostDraft,
+  fallbackBase: PostDraft,
+): PostDraft {
+  const loc = rec.locale;
+  const oldBase: PostDraft = {
+    locales: { [loc]: rec.base ?? fallbackBase.locales[loc] },
+    shared: rec.baseShared ?? fallbackBase.shared,
+  };
+  return mergeDrafts(oldBase, { locales: { [loc]: rec.fields }, shared: rec.shared }, target);
 }

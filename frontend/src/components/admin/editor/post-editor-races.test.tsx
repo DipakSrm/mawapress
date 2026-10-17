@@ -240,7 +240,7 @@ describe("a language with text but no title", () => {
     await waitFor(() => expect(calls).toHaveLength(1)); // the Nepali edit is saved
     expect(await screen.findByText("Add a title to save the English version")).toBeInTheDocument();
     expect(screen.queryByText(/^Saved ·/)).toBeNull();
-    const kept = JSON.parse(window.localStorage.getItem("mawapress:draft:p1:en")!);
+    const kept = JSON.parse(window.localStorage.getItem("mawapress:draft:u-ed:p1:en")!);
     expect(kept.fields.excerpt).toBe("English summary, no title yet");
 
     await user.click(screen.getByRole("link", { name: /Posts/ }));
@@ -287,7 +287,7 @@ describe("the kept copy", () => {
     await screen.findByText(/^Saved ·/);
     await advance(2000);
 
-    const kept = () => window.localStorage.getItem("mawapress:kept:p1:ne");
+    const kept = () => window.localStorage.getItem("mawapress:kept:u-ed:p1:ne");
     expect(JSON.parse(kept()!).fields.title).toBe("शीर्षकmine");
 
     cleanup();
@@ -300,7 +300,7 @@ describe("the kept copy", () => {
 
   it("asks before discarding the kept copy", async () => {
     window.localStorage.setItem(
-      "mawapress:draft:p1:ne",
+      "mawapress:draft:u-ed:p1:ne",
       JSON.stringify({
         savedAt: Date.now() + 1000,
         locale: "ne",
@@ -317,17 +317,17 @@ describe("the kept copy", () => {
     );
     const { user } = mount(post());
     await user.click(await screen.findByRole("button", { name: "Discard" }));
-    expect(window.localStorage.getItem("mawapress:kept:p1:ne")).not.toBeNull();
+    expect(window.localStorage.getItem("mawapress:kept:u-ed:p1:ne")).not.toBeNull();
     await user.click(
       within(await screen.findByRole("dialog")).getByRole("button", { name: "Keep it" }),
     );
-    expect(window.localStorage.getItem("mawapress:kept:p1:ne")).not.toBeNull();
+    expect(window.localStorage.getItem("mawapress:kept:u-ed:p1:ne")).not.toBeNull();
     await user.click(screen.getByRole("button", { name: "Discard" }));
     await user.click(
       within(await screen.findByRole("dialog")).getByRole("button", { name: "Discard" }),
     );
-    expect(window.localStorage.getItem("mawapress:kept:p1:ne")).toBeNull();
-    expect(window.localStorage.getItem("mawapress:draft:p1:ne")).toBeNull();
+    expect(window.localStorage.getItem("mawapress:kept:u-ed:p1:ne")).toBeNull();
+    expect(window.localStorage.getItem("mawapress:draft:u-ed:p1:ne")).toBeNull();
   });
 });
 
@@ -402,7 +402,7 @@ describe("create idempotency", () => {
           items: [
             {
               id: "made",
-              updated_at: new Date().toISOString(),
+              created_at: new Date().toISOString(),
               translations: [{ title: "Headline" }],
             },
           ],
@@ -423,5 +423,97 @@ describe("create idempotency", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/admin/posts/made"));
     expect(lookups).toBe(1);
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+
+  /** A create that fails with a 500 once, then a lookup that returns `items`; returns what the editor did. */
+  async function failedCreateThenLookup(items: { id: string; created_at: string }[]) {
+    const calls = writes(() =>
+      HttpResponse.json(
+        { error: { code: "INTERNAL_ERROR", message: "x", details: {} } },
+        { status: 500 },
+      ),
+    );
+    server.use(
+      http.get("*/api/posts", () =>
+        HttpResponse.json({
+          total: items.length,
+          limit: 10,
+          offset: 0,
+          items: items.map((i) => ({ ...i, translations: [{ title: "Headline" }] })),
+        }),
+      ),
+      http.get("*/api/posts/:id", ({ params }) =>
+        HttpResponse.json(
+          post({
+            id: String(params.id),
+            updated_at: T3,
+            translations: [tr("ne", { title: "Headline" })],
+          }),
+        ),
+      ),
+    );
+    const { user } = mount(null);
+    await user.type(await title(), "Headline");
+    await user.selectOptions(await screen.findByLabelText("Category"), "1");
+    await save(user);
+    await screen.findByText("Not saved — retrying");
+    await advance(2500);
+    return calls;
+  }
+
+  it("does not adopt anything when several recent posts match; it fails safe", async () => {
+    const now = new Date().toISOString();
+    const calls = await failedCreateThenLookup([
+      { id: "a", created_at: now },
+      { id: "b", created_at: now },
+    ]);
+    expect(
+      await screen.findByText(/Could not tell whether this post was already created/),
+    ).toBeInTheDocument();
+    expect(window.location.pathname).not.toBe("/admin/posts/a");
+    expect(window.location.pathname).not.toBe("/admin/posts/b");
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(1); // no second create either
+  });
+
+  it("ignores a same-titled post created more than two minutes ago", async () => {
+    const old = new Date(Date.now() - 10 * 60_000).toISOString();
+    const calls = await failedCreateThenLookup([{ id: "old", created_at: old }]);
+    await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(2)); // creates a fresh one
+    expect(window.location.pathname).not.toBe("/admin/posts/old");
+  });
+});
+
+describe("a successful create", () => {
+  it("clears the new-post live and kept copies for the user", async () => {
+    const stored = JSON.stringify({
+      savedAt: Date.now(),
+      locale: "ne",
+      fields: {
+        title: "Old unsaved idea",
+        content: { type: "doc", content: [{ type: "paragraph" }] },
+        excerpt: "",
+        seoTitle: "",
+        seoDescription: "",
+        slug: "",
+      },
+      shared: { categoryId: null, tags: [], featuredMedia: null, isBreaking: false },
+    });
+    window.localStorage.setItem("mawapress:kept:u-ed:new:ne", stored);
+    window.localStorage.setItem("mawapress:draft:u-ed:new:en", stored);
+    window.localStorage.setItem("mawapress:kept:u-rep:new:ne", stored); // another user's: stays
+    const calls = writes(() =>
+      HttpResponse.json(
+        post({ id: "made", updated_at: T1, translations: [tr("ne", { title: "Headline" })] }),
+      ),
+    );
+    const { user } = mount(null);
+    await user.type(await title(), "Headline");
+    await user.selectOptions(await screen.findByLabelText("Category"), "1");
+    await save(user);
+    await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(1));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/posts/made"));
+    expect(window.localStorage.getItem("mawapress:kept:u-ed:new:ne")).toBeNull();
+    expect(window.localStorage.getItem("mawapress:draft:u-ed:new:en")).toBeNull();
+    expect(window.localStorage.getItem("mawapress:kept:u-rep:new:ne")).toBe(stored);
   });
 });
