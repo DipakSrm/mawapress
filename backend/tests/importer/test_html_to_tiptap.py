@@ -70,3 +70,8 @@ def test_images_only_from_resolved_sources():
 def test_empty_input_gives_empty_paragraph():
     doc, _ = convert("")
     assert doc == {"type": "doc", "content": [{"type": "paragraph"}]}
+
+
+def test_whitespace_only_heading_yields_no_heading():
+    doc, _ = convert("<h2>   </h2><h3><br></h3><p>x</p>")
+    assert [n["type"] for n in doc["content"]] == ["paragraph"]

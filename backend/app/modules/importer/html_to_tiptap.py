@@ -197,6 +197,8 @@ class _Converter:
                 level = 4
             nodes = self.inline(el.children, [], depth)
             text = [n for n in nodes if n["type"] != "image"]
+            if not any(n["type"] == "text" and n["text"].strip() for n in text):
+                text = []
             heading = [{"type": "heading", "attrs": {"level": level}, "content": text}] if text else []
             return heading + [n for n in nodes if n["type"] == "image"]
         if tag in ("ul", "ol"):

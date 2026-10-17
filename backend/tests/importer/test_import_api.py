@@ -143,16 +143,126 @@ async def test_zip_bomb_guards(mclient, session):
         assert r.json()["error"]["code"] == "DOCX_TOO_LARGE"
 
 
-async def test_xxe_is_not_resolved(mclient, session, tmp_path):
+def docx_with_document_xml(xml: bytes, rels: bytes | None = None) -> bytes:
+    good = zipfile.ZipFile(io.BytesIO(build_docx()))
+    members = {n: good.read(n) for n in good.namelist()}
+    members["word/document.xml"] = xml
+    if rels is not None:
+        members["word/_rels/document.xml.rels"] = rels
+    return zip_with(members)
+
+
+W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+async def test_xxe_expands_to_nothing(mclient, session, tmp_path):
     secret = tmp_path / "secret.txt"
     secret.write_text("TOPSECRETVALUE")
     xml = (
         f'<?xml version="1.0"?><!DOCTYPE d [<!ENTITY x SYSTEM "{secret.as_uri()}">]>'
-        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        "<w:body><w:p><w:r><w:t>&x;</w:t></w:r></w:p></w:body></w:document>"
+        f'<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:t>before&x;after</w:t></w:r></w:p></w:body></w:document>'
     ).encode()
-    good = zipfile.ZipFile(io.BytesIO(build_docx()))
-    members = {n: good.read(n) for n in good.namelist()}
-    members["word/document.xml"] = xml
-    r, _ = await do_import(mclient, session, zip_with(members))
+    r, _ = await do_import(mclient, session, docx_with_document_xml(xml))
     assert "TOPSECRETVALUE" not in r.text
+    assert r.status_code in (201, 422), r.text
+    if r.status_code == 201:
+        texts = [n.get("text", "") for n in walk(r.json()["post"]["translations"][0]["content_json"])]
+        assert "".join(texts) in ("beforeafter", "")
+
+
+async def test_billion_laughs_is_neutralised(mclient, session):
+    ents = '<!ENTITY a0 "lollollollollollollollollollol">' + "".join(
+        f'<!ENTITY a{i} "{"&a%d;" % (i - 1) * 10}">' for i in range(1, 10))
+    xml = (f'<?xml version="1.0"?><!DOCTYPE d [{ents}]><w:document xmlns:w="{W}"><w:body><w:p><w:r>'
+           "<w:t>&a9;</w:t></w:r></w:p></w:body></w:document>").encode()
+    r, _ = await do_import(mclient, session, docx_with_document_xml(xml))
+    assert r.status_code in (201, 422), r.text
+    assert len(r.text) < 100_000  # nothing close to the 3 GB the entity would expand to
+
+
+async def test_oversize_xml_part_is_413(mclient, session):
+    # hex of random bytes: ~26 MB of XML that deflates only ~2x, so neither the 15 MB upload cap nor the ratio guard fires
+    xml = b"<w:document/><!--" + os.urandom(13 * 1024 * 1024 + 1024).hex().encode() + b"-->"
+    r, _ = await do_import(mclient, session, zip_with({"word/document.xml": xml}))
+    assert r.status_code == 413 and r.json()["error"]["code"] == "DOCX_TOO_LARGE"
+
+
+async def test_external_linked_image_is_not_fetched(mclient, session, tmp_path, jobs):
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(image_bytes())
+    xml = (
+        f'<w:document xmlns:w="{W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing>'
+        '<wp:inline><wp:docPr id="1" name="x" descr="d"/><a:graphic><a:graphicData><pic:pic><pic:blipFill>'
+        '<a:blip r:link="rId77"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline>'
+        "</w:drawing></w:r></w:p></w:body></w:document>"
+    ).encode()
+    rels = (
+        '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId77" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+        f'Target="{secret.as_uri()}" TargetMode="External"/></Relationships>'
+    ).encode()
+    r, _ = await do_import(mclient, session, docx_with_document_xml(xml, rels))
+    assert r.status_code == 201, r.text
+    assert r.json()["report"]["images"] == 0 and jobs == []
+    assert (await session.scalars(select(Media))).all() == []
+    assert any("image" in w.lower() for w in r.json()["report"]["warnings"])
+
+
+async def test_busy_when_both_slots_taken_and_slot_survives_timeout(mclient, session, monkeypatch):
+    import threading
+    import time
+
+    from app.modules.importer import service
+
+    # a third request while both slots are held is rejected at once
+    await service._slots.acquire()
+    await service._slots.acquire()
+    try:
+        r, _ = await do_import(mclient, session, build_docx())
+        assert r.status_code == 503, r.text
+        assert r.json()["error"]["code"] == "IMPORT_BUSY" and r.headers["retry-after"] == "30"
+    finally:
+        service._slots.release()
+        service._slots.release()
+
+    # a timed-out conversion keeps its slot until the thread really finishes
+    gate = threading.Event()
+    monkeypatch.setattr(service, "_extract", lambda raw: gate.wait(10))
+    monkeypatch.setattr(service, "TIME_LIMIT", 0.2)
+    r, _ = await do_import(mclient, session, build_docx())
+    assert r.status_code == 422 and r.json()["error"]["code"] == "IMPORT_TIMEOUT"
+    assert service._slots._value == service.CONVERSION_SLOTS - 1
+    gate.set()
+    for _ in range(100):
+        if service._slots._value == service.CONVERSION_SLOTS:
+            break
+        await __import__("asyncio").sleep(0.05)
+    assert service._slots._value == service.CONVERSION_SLOTS
+
+
+async def test_failure_after_image_upload_removes_the_media(mclient, session, storage, jobs, monkeypatch):
+    from app.core.errors import AppError
+    from app.modules.importer import service
+
+    async def boom(*a, **kw):
+        raise AppError(422, "BOOM", "create failed")
+
+    monkeypatch.setattr(service.posts_service, "create_post", boom)
+    r, _ = await do_import(mclient, session, build_docx(image=image_bytes()))
+    assert r.status_code == 422 and r.json()["error"]["code"] == "BOOM"
+    assert (await session.scalars(select(Media))).all() == []
+    assert not any((storage.root / "media").rglob("*.png"))
+    assert jobs == []
+
+
+async def test_upload_deadline_skips_remaining_images(mclient, session, monkeypatch):
+    from app.modules.importer import service
+
+    monkeypatch.setattr(service, "UPLOAD_DEADLINE", -1)
+    r, _ = await do_import(mclient, session, build_docx(image=image_bytes()))
+    assert r.status_code == 201, r.text
+    assert r.json()["report"]["images"] == 0
+    assert any("took too long" in w for w in r.json()["report"]["warnings"])

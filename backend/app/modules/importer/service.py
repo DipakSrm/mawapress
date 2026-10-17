@@ -1,6 +1,9 @@
 import asyncio
 import io
+import logging
+import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import mammoth
@@ -23,10 +26,37 @@ MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_MEMBERS = 2000
 MAX_RATIO = 100
 RATIO_FLOOR = 64 * 1024  # a tiny member can legitimately compress >100x; the total cap bounds those
+MAX_XML_PART_BYTES = 25 * 1024 * 1024  # one .xml/.rels part becomes a DOM many times its size
 MAX_IMAGES = 50
+UPLOAD_DEADLINE = 60  # seconds across all image uploads; later images are skipped
+CONVERSION_SLOTS = 2
 MAX_MESSAGES = 20
 TIME_LIMIT = 30  # seconds, per conversion phase
 MAX_TITLE = 300
+
+log = logging.getLogger("mawa.importer")
+
+# Conversions run on their own small pool (a timed-out thread cannot be killed, so it must not starve the
+# default executor that media uploads use). A slot is held until the thread really finishes, never on timeout.
+_executor = ThreadPoolExecutor(max_workers=CONVERSION_SLOTS, thread_name_prefix="docx-import")
+_slots = asyncio.Semaphore(CONVERSION_SLOTS)
+
+
+async def _run_limited(fn, *args):
+    if _slots.locked():
+        raise AppError(503, "IMPORT_BUSY", "Too many imports are running, try again shortly", headers={"Retry-After": "30"})
+    await _slots.acquire()  # not locked, so this returns immediately
+    loop = asyncio.get_running_loop()
+    try:
+        future = _executor.submit(fn, *args)
+    except BaseException:
+        _slots.release()
+        raise
+    future.add_done_callback(lambda _: loop.call_soon_threadsafe(_slots.release))
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(future), TIME_LIMIT)
+    except TimeoutError:
+        raise AppError(422, "IMPORT_TIMEOUT", "This document took too long to convert") from None
 
 STYLE_MAP = """
 p[style-name='Quote'] => blockquote > p
@@ -45,6 +75,8 @@ def check_docx(raw: bytes) -> None:
             total = 0
             for info in infos:
                 total += info.file_size
+                if info.file_size > MAX_XML_PART_BYTES and info.filename.endswith((".xml", ".rels")):
+                    raise AppError(413, "DOCX_TOO_LARGE", "A part of this document is too large")
                 big = info.file_size >= RATIO_FLOOR
                 if big and (info.compress_size == 0 or info.file_size / info.compress_size > MAX_RATIO):
                     raise AppError(413, "DOCX_TOO_LARGE", "This document expands too much when unpacked")
@@ -80,7 +112,8 @@ def _extract(raw: bytes) -> _Extracted:
 
     try:
         result = mammoth.convert_to_html(
-            io.BytesIO(raw), style_map=STYLE_MAP, convert_image=mammoth.images.img_element(on_image)
+            io.BytesIO(raw), style_map=STYLE_MAP, convert_image=mammoth.images.img_element(on_image),
+            external_file_access=False,
         )
     except AppError:
         raise
@@ -110,6 +143,21 @@ def _title_from(doc: dict, given: str | None, filename: str | None) -> str:
     return name.strip()[:MAX_TITLE] or "Untitled import"
 
 
+async def _discard_media(session: AsyncSession, storage: Storage, media_ids: list) -> None:
+    """Best-effort removal of media this import created when the import itself failed."""
+    if not media_ids:
+        return
+    try:
+        await session.rollback()
+    except Exception:
+        log.warning("rollback before import cleanup failed", exc_info=True)
+    for media_id in media_ids:
+        try:
+            await media_service.delete_media(session, storage, media_id)
+        except Exception:
+            log.warning("could not remove media %s left by a failed import", media_id, exc_info=True)
+
+
 async def import_docx(
     session: AsyncSession, storage: Storage, enqueue: Enqueuer, user: User, *,
     raw: bytes, filename: str | None, locale: Locale, category_id: int, title: str | None,
@@ -118,34 +166,40 @@ async def import_docx(
         raise AppError(413, "FILE_TOO_LARGE", "Documents can be at most 15 MB")
     if await session.get(Category, category_id) is None:
         raise AppError(422, "CATEGORY_NOT_FOUND", "Category does not exist")
-    try:
-        extracted = await asyncio.wait_for(asyncio.to_thread(_extract, raw), TIME_LIMIT)
-    except TimeoutError:
-        raise AppError(422, "IMPORT_TIMEOUT", "This document took too long to convert") from None
+    extracted = await _run_limited(_extract, raw)
 
     warnings = list(dict.fromkeys(extracted.warnings))
     urls: dict[str, str] = {}
-    for n, data in enumerate(extracted.images):
-        try:
-            media = await media_service.upload(session, storage, user, data)
-        except AppError as exc:  # a bad image costs that image, not the import
-            warnings.append(f"image {n + 1} was skipped: {exc.message}")
-            continue
-        urls[f"mawa-img:{n}"] = storage.url(media.key)
-        await enqueue_quietly(enqueue, "make_variants", str(media.id))
-
+    created: list = []
+    deadline = time.monotonic() + UPLOAD_DEADLINE
     try:
-        doc, html_warnings = await asyncio.wait_for(asyncio.to_thread(convert, extracted.html, urls), TIME_LIMIT)
-    except TimeoutError:
-        raise AppError(422, "IMPORT_TIMEOUT", "This document took too long to convert") from None
-    except RecursionError:
-        raise AppError(422, "DOCX_UNREADABLE", "This document is too deeply nested to import") from None
-    warnings.extend(w for w in html_warnings if w not in warnings)
+        for n, data in enumerate(extracted.images):
+            if time.monotonic() > deadline:
+                warnings.append(f"image {n + 1} and later images were skipped: the import took too long")
+                break
+            try:
+                media = await media_service.upload(session, storage, user, data)
+            except AppError as exc:  # a bad image costs that image, not the import
+                warnings.append(f"image {n + 1} was skipped: {exc.message}")
+                continue
+            created.append(media.id)
+            urls[f"mawa-img:{n}"] = storage.url(media.key)
 
-    post = await posts_service.create_post(
-        session, user,
-        PostCreate(locale=locale, title=_title_from(doc, title, filename), content_json=doc, category_id=category_id),
-    )
+        try:
+            doc, html_warnings = await _run_limited(convert, extracted.html, urls)
+        except RecursionError:
+            raise AppError(422, "DOCX_UNREADABLE", "This document is too deeply nested to import") from None
+        warnings.extend(w for w in html_warnings if w not in warnings)
+
+        post = await posts_service.create_post(
+            session, user,
+            PostCreate(locale=locale, title=_title_from(doc, title, filename), content_json=doc, category_id=category_id),
+        )
+    except BaseException:
+        await _discard_media(session, storage, created)
+        raise
+    for media_id in created:
+        await enqueue_quietly(enqueue, "make_variants", str(media_id))
     return post, ImportReport(images=len(urls), warnings=warnings)
 
 
