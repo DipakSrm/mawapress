@@ -5,6 +5,12 @@
 export const AUTH_EXPIRED_EVENT = "auth:expired";
 
 let accessToken: string | null = null;
+let expiryEpoch = 0;
+
+/** Increments on every session expiry; lets in-flight requests detect that the session already ended. */
+export function getExpiryEpoch(): number {
+  return expiryEpoch;
+}
 
 export function getAccessToken(): string | null {
   return accessToken;
@@ -17,6 +23,7 @@ export function setAccessToken(token: string | null): void {
 /** Drop the session and tell the UI to go to the login screen. */
 export function expireSession(): void {
   accessToken = null;
+  expiryEpoch++;
   if (typeof window !== "undefined") window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
 }
 
@@ -33,7 +40,11 @@ export function readCsrfCookie(): string | null {
     const i = part.indexOf("=");
     if (i === -1) continue;
     if (part.slice(0, i).trim() === CSRF_COOKIE) {
-      return decodeURIComponent(part.slice(i + 1).trim());
+      try {
+        return decodeURIComponent(part.slice(i + 1).trim());
+      } catch {
+        return null; // malformed value: treat as missing
+      }
     }
   }
   return null;

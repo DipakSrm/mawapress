@@ -10,7 +10,7 @@ Next.js 15 with the public site and the newsroom admin in one app. Setup, enviro
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev        # http://localhost:3000, proxies /api to http://127.0.0.1:8000
 npm run lint && npm run typecheck && npm test && npm run build
 npm run gen:api    # re-export contracts/openapi.json and regenerate src/lib/api/schema.d.ts

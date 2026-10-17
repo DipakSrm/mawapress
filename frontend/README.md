@@ -7,7 +7,7 @@ public site (`src/app/(public)`, built out in M4) and the newsroom admin (`src/a
 
 ```bash
 cd frontend
-npm install
+npm ci                       # installs the exact locked versions
 cp .env.example .env.local   # optional
 npm run dev                  # http://localhost:3000
 ```
@@ -17,9 +17,12 @@ call to succeed.
 
 ## Environment
 
-| Variable      | Default                 | Purpose                                                                         |
-| ------------- | ----------------------- | ------------------------------------------------------------------------------- |
-| `BACKEND_URL` | `http://127.0.0.1:8000` | Server-side target of the `/api/*` and `/media/*` rewrites in `next.config.ts`. |
+| Variable      | Default                 | Purpose                                                             |
+| ------------- | ----------------------- | ------------------------------------------------------------------- |
+| `BACKEND_URL` | `http://127.0.0.1:8000` | Target of the `/api/*` and `/media/*` rewrites in `next.config.ts`. |
+
+Rewrite destinations are baked in at build time (`next build` writes them to the routes manifest), so
+changing `BACKEND_URL` for a built app needs a rebuild. `npm run dev` picks it up on restart.
 
 ## API access
 

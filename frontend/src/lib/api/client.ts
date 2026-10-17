@@ -1,5 +1,11 @@
 import { ApiError, errorFromResponse } from "./errors";
-import { expireSession, getAccessToken, readCsrfCookie, setAccessToken } from "./session";
+import {
+  expireSession,
+  getAccessToken,
+  getExpiryEpoch,
+  readCsrfCookie,
+  setAccessToken,
+} from "./session";
 
 export { ApiError, isApiError } from "./errors";
 export {
@@ -127,15 +133,24 @@ export function createApiClient({ baseUrl = "" }: ApiClientOptions = {}) {
       xhr.upload.onprogress = (ev) => {
         if (ev.lengthComputable && ev.total > 0) opts.onProgress?.(ev.loaded / ev.total);
       };
+      const onAbort = () => xhr.abort();
+      const settle = () => opts.signal?.removeEventListener("abort", onAbort);
       xhr.onload = () => {
+        settle();
         const headers = new Headers();
         const retry = xhr.getResponseHeader("Retry-After");
         if (retry) headers.set("Retry-After", retry);
         resolve({ status: xhr.status, headers, body: parseBody(xhr.responseText) });
       };
-      xhr.onerror = () => reject(new ApiError(0, "NETWORK_ERROR", "Could not reach the server"));
-      xhr.onabort = () => reject(aborted());
-      opts.signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+      xhr.onerror = () => {
+        settle();
+        reject(new ApiError(0, "NETWORK_ERROR", "Could not reach the server"));
+      };
+      xhr.onabort = () => {
+        settle();
+        reject(aborted());
+      };
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
       xhr.send(form);
     });
   }
@@ -171,7 +186,8 @@ export function createApiClient({ baseUrl = "" }: ApiClientOptions = {}) {
       setAccessToken(token);
       return token;
     } catch (e) {
-      expireSession();
+      // A network failure says nothing about the session: keep the token and let a later request retry.
+      if (!(e instanceof ApiError && e.status === 0)) expireSession();
       throw e;
     }
   }
@@ -195,15 +211,17 @@ export function createApiClient({ baseUrl = "" }: ApiClientOptions = {}) {
     attempt: (token: string | null) => Promise<RawResponse>,
   ): Promise<T> {
     const sentWith = auth ? getAccessToken() : null;
+    const epoch = getExpiryEpoch();
     let raw = await attempt(sentWith);
     if (auth && raw.status === 401) {
       const err = errorFromResponse(raw.status, raw.body, raw.headers);
-      if (REFRESHABLE_CODES.has(err.code)) {
+      // If the session expired while this request was in flight, fail fast: no second refresh.
+      if (REFRESHABLE_CODES.has(err.code) && getExpiryEpoch() === epoch) {
         // If another request already refreshed while ours was in flight, just use the new token.
         const current = getAccessToken();
         const token = current && current !== sentWith ? current : await refresh();
         raw = await attempt(token);
-        if (raw.status === 401) expireSession();
+        if (raw.status === 401 && getExpiryEpoch() === epoch) expireSession();
       }
     }
     if (raw.status >= 200 && raw.status < 300) return raw.body as T;

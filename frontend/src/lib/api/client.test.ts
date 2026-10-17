@@ -303,6 +303,167 @@ describe("token refresh", () => {
   });
 });
 
+describe("refresh edge cases", () => {
+  const listen = () => {
+    const expired = vi.fn();
+    window.addEventListener(AUTH_EXPIRED_EVENT, expired);
+    return { expired, stop: () => window.removeEventListener(AUTH_EXPIRED_EVENT, expired) };
+  };
+  const unauthorised = () => HttpResponse.json(envelope("INVALID_TOKEN"), { status: 401 });
+
+  it("two concurrent requests with a REUSED refresh: one refresh call, one auth:expired", async () => {
+    setAccessToken("old");
+    let refreshCalls = 0;
+    server.use(
+      http.get(`${BASE}/api/a`, unauthorised),
+      http.get(`${BASE}/api/b`, unauthorised),
+      http.post(`${BASE}/api/auth/refresh`, async () => {
+        refreshCalls++;
+        await new Promise((r) => setTimeout(r, 30));
+        return HttpResponse.json(envelope("REFRESH_REUSED"), { status: 401 });
+      }),
+    );
+    const l = listen();
+    const results = await Promise.all([
+      api.get("/api/a").catch((e) => e),
+      api.get("/api/b").catch((e) => e),
+    ]);
+    l.stop();
+    expect(results.map((e) => (e as ApiError).code)).toEqual(["REFRESH_REUSED", "REFRESH_REUSED"]);
+    expect(refreshCalls).toBe(1);
+    expect(l.expired).toHaveBeenCalledTimes(1);
+  });
+
+  it("a 401 arriving after the session already expired fails fast without a second refresh", async () => {
+    setAccessToken("old");
+    let refreshCalls = 0;
+    server.use(
+      http.get(`${BASE}/api/fast`, unauthorised),
+      http.get(`${BASE}/api/slow`, async () => {
+        await new Promise((r) => setTimeout(r, 150));
+        return unauthorised();
+      }),
+      http.post(`${BASE}/api/auth/refresh`, () => {
+        refreshCalls++;
+        return HttpResponse.json(envelope("REFRESH_REUSED"), { status: 401 });
+      }),
+    );
+    const l = listen();
+    const [fast, slow] = await Promise.all([
+      api.get("/api/fast").catch((e) => e),
+      api.get("/api/slow").catch((e) => e),
+    ]);
+    l.stop();
+    expect((fast as ApiError).code).toBe("REFRESH_REUSED");
+    expect(slow).toMatchObject({ status: 401, code: "INVALID_TOKEN" });
+    expect(refreshCalls).toBe(1);
+    expect(l.expired).toHaveBeenCalledTimes(1);
+  });
+
+  it("a network error during refresh keeps the session and surfaces NETWORK_ERROR", async () => {
+    setAccessToken("old");
+    server.use(
+      http.get(`${BASE}/api/me`, unauthorised),
+      http.post(`${BASE}/api/auth/refresh`, () => HttpResponse.error()),
+    );
+    const l = listen();
+    const err = await api.get("/api/me").catch((e) => e);
+    l.stop();
+    expect(err).toMatchObject({ status: 0, code: "NETWORK_ERROR" });
+    expect(l.expired).not.toHaveBeenCalled();
+    expect(getAccessToken()).toBe("old");
+
+    // A later request retries the refresh and succeeds.
+    server.use(
+      http.get(`${BASE}/api/me`, ({ request }) =>
+        request.headers.get("authorization") === "Bearer new"
+          ? HttpResponse.json({ ok: 1 })
+          : unauthorised(),
+      ),
+      http.post(`${BASE}/api/auth/refresh`, () => HttpResponse.json({ access_token: "new" })),
+    );
+    await expect(api.get("/api/me")).resolves.toEqual({ ok: 1 });
+  });
+
+  it("a 401 on the refresh call itself never recurses", async () => {
+    setAccessToken("old");
+    let refreshCalls = 0;
+    server.use(
+      http.get(`${BASE}/api/me`, unauthorised),
+      http.post(`${BASE}/api/auth/refresh`, () => {
+        refreshCalls++;
+        return HttpResponse.json(envelope("INVALID_TOKEN"), { status: 401 });
+      }),
+    );
+    const l = listen();
+    const err = await api.get("/api/me").catch((e) => e);
+    l.stop();
+    expect(err).toMatchObject({ status: 401, code: "INVALID_TOKEN" });
+    expect(refreshCalls).toBe(1);
+    expect(l.expired).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a token set by another refresh while the request was in flight, without refreshing", async () => {
+    setAccessToken("old");
+    let refreshCalls = 0;
+    server.use(
+      http.get(`${BASE}/api/me`, async ({ request }) => {
+        if (request.headers.get("authorization") === "Bearer newer") {
+          return HttpResponse.json({ ok: 1 });
+        }
+        await new Promise((r) => setTimeout(r, 20));
+        return unauthorised();
+      }),
+      http.post(`${BASE}/api/auth/refresh`, () => {
+        refreshCalls++;
+        return HttpResponse.json({ access_token: "x" });
+      }),
+    );
+    const pending = api.get("/api/me");
+    setAccessToken("newer"); // e.g. another request finished a refresh meanwhile
+    await expect(pending).resolves.toEqual({ ok: 1 });
+    expect(refreshCalls).toBe(0);
+  });
+
+  it("a second REFRESH_STALE after the retry expires the session", async () => {
+    setAccessToken("old");
+    let refreshCalls = 0;
+    server.use(
+      http.get(`${BASE}/api/me`, unauthorised),
+      http.post(`${BASE}/api/auth/refresh`, () => {
+        refreshCalls++;
+        return HttpResponse.json(envelope("REFRESH_STALE"), { status: 401 });
+      }),
+    );
+    const l = listen();
+    const err = await api.get("/api/me").catch((e) => e);
+    l.stop();
+    expect(err).toMatchObject({ status: 401, code: "REFRESH_STALE" });
+    expect(refreshCalls).toBe(2);
+    expect(l.expired).toHaveBeenCalledTimes(1);
+    expect(getAccessToken()).toBeNull();
+  });
+
+  it("treats a malformed CSRF cookie as missing", async () => {
+    setAccessToken("old");
+    document.cookie = "mawa_csrf=%E0%A4%A; path=/";
+    let header: string | null = "unset";
+    server.use(
+      http.get(`${BASE}/api/me`, ({ request }) =>
+        request.headers.get("authorization") === "Bearer new"
+          ? HttpResponse.json({ ok: 1 })
+          : unauthorised(),
+      ),
+      http.post(`${BASE}/api/auth/refresh`, ({ request }) => {
+        header = request.headers.get("x-csrf-token");
+        return HttpResponse.json({ access_token: "new" });
+      }),
+    );
+    await expect(api.get("/api/me")).resolves.toEqual({ ok: 1 });
+    expect(header).toBeNull();
+  });
+});
+
 describe("upload", () => {
   it("posts multipart with the bearer token and parses the response", async () => {
     setAccessToken("tok");
