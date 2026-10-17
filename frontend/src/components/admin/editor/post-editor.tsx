@@ -8,6 +8,14 @@ import { toast } from "sonner";
 import { ScheduleDialog } from "@/components/admin/posts/schedule-dialog";
 import { RichEditor } from "@/components/editor/RichEditor";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Switch } from "@/components/ui/switch";
@@ -125,6 +133,7 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
     initial,
     initialLocale,
     canBreak: isEditor,
+    userId: user?.id,
     // The App Router syncs a direct replaceState, so the page keeps its state (and the caret).
     onCreated: (out) => window.history.replaceState(null, "", `/admin/posts/${out.id}`),
   });
@@ -212,31 +221,58 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
     }),
   ) as Record<Locale, TabState>;
 
+  // What the publish confirmation lists: the server's translations, read after the flush that precedes it.
   const targets: PublishTarget[] = LOCALES.flatMap((l) => {
-    const d = draft.locales[l];
     const tr = post?.translations.find((t) => t.locale === l);
-    return d && tr ? [{ locale: l, title: d.title, live: tr.status === "published" }] : [];
+    return tr ? [{ locale: l, title: tr.title, live: tr.status === "published" }] : [];
   });
 
   // ---- workflow -----------------------------------------------------------------------------
 
+  // Covers the flush before an action as well as the request, so a double click cannot run two actions.
+  const acting = useRef(false);
+  const [actingNow, setActingNow] = useState(false);
+
   async function runAction(action: PostAction): Promise<ActionResult> {
     if (!post) throw new Error("Save the post before changing its state");
-    if (!(await ed.flush())) {
-      toast.error("Your latest changes could not be saved. Fix that, then try again.");
-      return { ok: false, error: new ApiError(0, "NOT_SAVED", "Unsaved changes") };
+    if (acting.current) {
+      return {
+        ok: false,
+        error: new ApiError(0, "ACTION_IN_PROGRESS", "Another action is running"),
+      };
     }
-    const result = await actions.run(
-      { id: post.id, updated_at: ed.getUpdatedAt() ?? post.updated_at },
-      action,
-    );
-    if (result.ok) ed.acceptPost(result.post);
-    else if (result.error.status === 412) {
-      const current = result.error.details.current_updated_at;
-      ed.reportConflict(typeof current === "string" ? current : null);
+    acting.current = true;
+    setActingNow(true);
+    try {
+      if (!(await ed.flush())) {
+        toast.error("Your latest changes could not be saved. Fix that, then try again.");
+        return { ok: false, error: new ApiError(0, "NOT_SAVED", "Unsaved changes") };
+      }
+      const result = await actions.run(
+        { id: post.id, updated_at: ed.getUpdatedAt() ?? post.updated_at },
+        action,
+      );
+      if (result.ok) ed.acceptPost(result.post);
+      else if (result.error.status === 412) {
+        const current = result.error.details.current_updated_at;
+        ed.reportConflict(typeof current === "string" ? current : null);
+      }
+      return result;
+    } finally {
+      acting.current = false;
+      setActingNow(false);
     }
-    return result;
   }
+
+  /** Before the publish confirmation: save, so the dialog lists what the server really holds. */
+  async function prepareToPublish(): Promise<boolean> {
+    const ok = await ed.flush();
+    if (!ok) toast.error("Your latest changes could not be saved. Fix that, then try again.");
+    return ok;
+  }
+
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const [leaveTo, setLeaveTo] = useState<string | null>(null);
 
   async function reload(action: () => Promise<unknown>) {
     setRestoring(true);
@@ -266,7 +302,8 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
         targets={targets}
         categories={categories.data}
         status={ed.status}
-        busy={actions.pendingId !== null}
+        busy={actions.pendingId !== null || actingNow}
+        onPrepare={prepareToPublish}
         canEdit={canEdit}
         onSave={() => void ed.flush()}
         onRun={runAction}
@@ -295,7 +332,7 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
                 {restoring && <Loader2 aria-hidden className="animate-spin" />}
                 Load their version
               </Button>
-              <Button size="sm" disabled={restoring} onClick={() => void ed.overwrite()}>
+              <Button size="sm" disabled={restoring} onClick={() => void reload(ed.overwrite)}>
                 Overwrite
               </Button>
             </>
@@ -314,7 +351,7 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
               <Button size="sm" onClick={ed.restoreLocal}>
                 Restore unsaved changes
               </Button>
-              <Button size="sm" variant="ghost" onClick={ed.dismissRestore}>
+              <Button size="sm" variant="ghost" onClick={() => setDiscardOpen(true)}>
                 Discard
               </Button>
             </>
@@ -543,7 +580,14 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
         />
       )}
       {importOpen && (
-        <ImportDocxDialog onClose={() => setImportOpen(false)} defaultLocale={locale} />
+        <ImportDocxDialog
+          onClose={() => setImportOpen(false)}
+          defaultLocale={locale}
+          onOpen={(path) => {
+            setImportOpen(false);
+            setLeaveTo(path); // the leave guard decides: straight through when saved, a prompt when not
+          }}
+        />
       )}
       {revisionsOpen && post && (
         <RevisionsDrawer
@@ -558,7 +602,39 @@ export function PostEditor({ initial, onRequestMedia }: PostEditorProps) {
           onClose={() => setRevisionsOpen(false)}
         />
       )}
-      <LeaveGuard dirty={ed.dirty} flush={ed.flush} />
+      <LeaveGuard
+        dirty={ed.dirty}
+        flush={ed.flush}
+        request={leaveTo}
+        onRequestHandled={() => setLeaveTo(null)}
+      />
+      {discardOpen && (
+        <Dialog open onOpenChange={(open) => !open && setDiscardOpen(false)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Discard the unsaved copy?</DialogTitle>
+              <DialogDescription>
+                The edits kept in this browser are deleted for good. They cannot be recovered.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setDiscardOpen(false)}>
+                Keep it
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={() => {
+                  ed.dismissRestore();
+                  setDiscardOpen(false);
+                }}
+              >
+                Discard
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }

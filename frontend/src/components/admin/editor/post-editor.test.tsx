@@ -238,6 +238,7 @@ describe("conflicts", () => {
     const calls = captureWrites((_, n) =>
       n === 1 ? conflict() : patchOk(makePost({ updated_at: "2026-01-01T10:20:00Z" })),
     );
+    server.use(http.get("*/api/posts/p1", () => HttpResponse.json(makePost({ updated_at: T2 }))));
     const { user } = mount(makePost());
     await user.type(await title(), "!");
     await user.keyboard("{Control>}s{/Control}");
@@ -271,7 +272,7 @@ describe("conflicts", () => {
       expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Their headline"),
     );
     expect(screen.queryByText("Someone else edited this post")).toBeNull();
-    expect(JSON.parse(window.localStorage.getItem("mawapress:draft:p1:ne")!).fields.title).toBe(
+    expect(JSON.parse(window.localStorage.getItem("mawapress:kept:p1:ne")!).fields.title).toBe(
       "मोरङमा बाढी!",
     );
 

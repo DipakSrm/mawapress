@@ -48,10 +48,12 @@ export function importErrorMessage(e: ApiError): string {
 interface Props {
   onClose: () => void;
   defaultLocale?: Locale;
+  /** Where to go with the new draft. Defaults to a plain router push; the editor routes it through its leave guard. */
+  onOpen?: (path: string) => void;
 }
 
 /** Upload a .docx, show what the importer dropped, then open the new draft. */
-export function ImportDocxDialog({ onClose, defaultLocale = "ne" }: Props) {
+export function ImportDocxDialog({ onClose, defaultLocale = "ne", onOpen }: Props) {
   const router = useRouter();
   const categories = useCategories();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -73,7 +75,9 @@ export function ImportDocxDialog({ onClose, defaultLocale = "ne" }: Props) {
   }, [wait]);
 
   function open(post: PostOut) {
-    router.push(`/admin/posts/${post.id}`);
+    const path = `/admin/posts/${post.id}`;
+    if (onOpen) onOpen(path);
+    else router.push(path);
   }
 
   function pick(next: File | null) {

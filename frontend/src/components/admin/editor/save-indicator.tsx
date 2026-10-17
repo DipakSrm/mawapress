@@ -39,9 +39,11 @@ function describe(status: SaveStatus): { text: string; icon: ReactNode; tone: st
     case "blocked":
       return {
         text:
-          status.reason === "title"
-            ? "Add a title to start saving"
-            : "Choose a category to start saving",
+          status.reason === "category"
+            ? "Choose a category to start saving"
+            : status.locale
+              ? `Add a title to save the ${status.locale === "ne" ? "Nepali" : "English"} version`
+              : "Add a title to start saving",
         icon: <PenLine aria-hidden />,
         tone: "text-muted-foreground",
       };

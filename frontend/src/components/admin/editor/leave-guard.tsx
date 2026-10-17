@@ -33,6 +33,9 @@ interface Props {
   dirty: boolean;
   /** Save now; resolves true when nothing is left unsaved. */
   flush: () => Promise<boolean>;
+  /** A navigation requested from code (not a link click): goes through the same check. */
+  request?: string | null;
+  onRequestHandled?: () => void;
 }
 
 /**
@@ -40,7 +43,7 @@ interface Props {
  * in-app link is held and asks first, because the App Router has no hook to cancel a navigation.
  * (The browser back button is covered by autosave and the local copy, not by a prompt.)
  */
-export function LeaveGuard({ dirty, flush }: Props) {
+export function LeaveGuard({ dirty, flush, request, onRequestHandled }: Props) {
   const router = useRouter();
   const [target, setTarget] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -50,6 +53,17 @@ export function LeaveGuard({ dirty, flush }: Props) {
   useEffect(() => {
     dirtyRef.current = dirty;
   }, [dirty]);
+
+  useEffect(() => {
+    if (!request) return;
+    onRequestHandled?.();
+    if (dirtyRef.current) {
+      setFailed(false);
+      setTarget(request);
+    } else {
+      router.push(request);
+    }
+  }, [request, onRequestHandled, router]);
 
   useEffect(() => {
     if (!dirty) return;

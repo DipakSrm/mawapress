@@ -47,6 +47,8 @@ interface Props {
   onSave: () => void;
   onRun: (action: PostAction) => Promise<ActionResult>;
   onRevisions: () => void;
+  /** Saves before the publish confirmation opens; resolves false when it could not. */
+  onPrepare: () => Promise<boolean>;
   onOpenSchedule: () => void;
   /** Extra controls, e.g. "Import from Word" on a new post. */
   extra?: ReactNode;
@@ -66,6 +68,7 @@ export function WorkflowBar({
   onSave,
   onRun,
   onRevisions,
+  onPrepare,
   onOpenSchedule,
   extra,
 }: Props) {
@@ -77,6 +80,9 @@ export function WorkflowBar({
     translation?.status === "draft";
   const live = post && post.status === "published" ? publicPath(post, categories) : null;
   const run = (action: PostAction) => void onRun(action);
+  const open = async (which: "publish" | "publish-translation") => {
+    if (await onPrepare()) setDialog(which);
+  };
   const spinner = busy && <Loader2 aria-hidden className="animate-spin" />;
 
   return (
@@ -191,13 +197,13 @@ export function WorkflowBar({
             type="button"
             size="sm"
             disabled={busy}
-            onClick={() => setDialog("publish-translation")}
+            onClick={() => void open("publish-translation")}
           >
             <CircleCheck aria-hidden /> Publish translation
           </Button>
         )}
         {can?.publish && (
-          <Button type="button" size="sm" disabled={busy} onClick={() => setDialog("publish")}>
+          <Button type="button" size="sm" disabled={busy} onClick={() => void open("publish")}>
             {spinner || <CircleCheck aria-hidden />} Publish
           </Button>
         )}

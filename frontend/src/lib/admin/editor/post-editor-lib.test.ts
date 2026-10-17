@@ -220,7 +220,7 @@ describe("planSave", () => {
     const base = serverDraft();
     const cur = serverDraft();
     cur.locales.en = { ...emptyLocaleDraft(), content: doc(p("hello")) };
-    expect(planSave(args(base, cur))).toEqual({ kind: "blocked", reason: "title" });
+    expect(planSave(args(base, cur))).toEqual({ kind: "blocked", reason: "title", locale: "en" });
     cur.locales.en!.title = " Hello ";
     expect(planSave(args(base, cur))).toEqual({
       kind: "patch",

@@ -3,11 +3,13 @@
 import type { JSONContent } from "@tiptap/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PostOut } from "@/lib/admin/posts";
+import { toast } from "sonner";
 import { api, ifMatch, isApiError } from "@/lib/api";
 import {
   acknowledge,
   clearStoredDraft,
   draftFromPost,
+  mergeDrafts,
   emptyDraft,
   emptyLocaleDraft,
   LOCALES,
@@ -28,6 +30,7 @@ const LOCAL_WRITE_MS = 800;
 const DERIVE_MS = 400;
 const RETRY_BASE_MS = 2_000;
 const RETRY_MAX_MS = 60_000;
+const MAX_PASSES = 3;
 
 export type SaveStatus =
   | { kind: "idle" }
@@ -36,7 +39,7 @@ export type SaveStatus =
   | { kind: "saved"; at: number }
   | { kind: "retrying" }
   | { kind: "offline" }
-  | { kind: "blocked"; reason: "title" | "category" }
+  | { kind: "blocked"; reason: "title" | "category"; locale?: Locale }
   | { kind: "error"; message: string }
   | { kind: "conflict" };
 
@@ -52,6 +55,8 @@ interface Options {
   initial: PostOut | null;
   initialLocale: Locale;
   canBreak: boolean;
+  /** The signed-in user, to recognise a post this user just created (see `findRecentDuplicate`). */
+  userId?: string;
   autosaveMs?: number;
   /** Called after the first save of a new post created it on the server. */
   onCreated?: (post: PostOut) => void;
@@ -77,6 +82,7 @@ export function usePostEditor({
   initial,
   initialLocale,
   canBreak,
+  userId,
   autosaveMs = AUTOSAVE_MS,
   onCreated,
 }: Options) {
@@ -98,6 +104,9 @@ export function usePostEditor({
   }>({});
   const canBreakRef = useRef(canBreak);
   const onCreatedRef = useRef(onCreated);
+  const userIdRef = useRef(userId);
+  /** Title of a create POST whose outcome is unknown (timeout, dropped connection, 5xx). */
+  const createUncertain = useRef<string | null>(null);
 
   const [post, setPostState] = useState<PostOut | null>(initial);
   const [activeLocale, setActiveLocaleState] = useState<Locale>(initialLocale);
@@ -112,6 +121,7 @@ export function usePostEditor({
   useEffect(() => {
     canBreakRef.current = canBreak;
     onCreatedRef.current = onCreated;
+    userIdRef.current = userId;
   });
 
   const setPost = useCallback((p: PostOut | null) => {
@@ -123,6 +133,7 @@ export function usePostEditor({
     setConflictState(c);
   }, []);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
+  const findRestoreOfferRef = useRef<() => RestoreOffer | null>(() => null);
 
   // ---- local copy of unsaved work -----------------------------------------------------------
 
@@ -196,118 +207,138 @@ export function usePostEditor({
     [autosaveMs],
   );
 
+  /**
+   * A create POST that failed in a way that may still have reached the server must not simply be repeated:
+   * that would make a second post. Before the next attempt we look for a post this user created in the
+   * last two minutes with the same title (the API has no idempotency key) and adopt it instead.
+   */
+  const findRecentDuplicate = useCallback(async (title: string): Promise<PostOut | null> => {
+    const author = userIdRef.current;
+    if (!author) return null;
+    const list = await api.get<{
+      items: { id: string; updated_at: string; translations: { title: string }[] }[];
+    }>("/api/posts", { query: { q: title, author_id: author, limit: 10 } });
+    const recent = Date.now() - 120_000;
+    const hit = list.items.find(
+      (p) => Date.parse(p.updated_at) >= recent && p.translations.some((t) => t.title === title),
+    );
+    return hit ? api.get<PostOut>(`/api/posts/${hit.id}`) : null;
+  }, []);
+
   const runSave = useCallback(
     async (flushAgain: () => Promise<boolean>): Promise<boolean> => {
       if (conflictRef.current) return false;
       clearRetry();
-      const plan = planSave({
-        postId: idRef.current,
-        base: baseRef.current,
-        cur: curRef.current,
-        activeLocale: localeRef.current,
-        published: publishedMap(postRef.current),
-        canBreak: canBreakRef.current,
-      });
-      if (plan.kind === "none") {
-        if (dirtyRef.current) {
-          dirtyRef.current = false;
-          setDirty(false);
-          clearStoredDraft(idRef.current);
-        }
-        setStatus((s) =>
-          s.kind === "idle" || s.kind === "saved" ? s : { kind: "saved", at: Date.now() },
-        );
-        return true;
-      }
-      if (plan.kind === "blocked") {
-        setStatus({ kind: "blocked", reason: plan.reason });
-        return false;
-      }
-      setStatus({ kind: "saving" });
-      const snapshot = curRef.current;
-      try {
-        if (plan.kind === "create") {
-          const out = await api.post<PostOut>("/api/posts", plan.body);
-          const sent = snapshot.locales[plan.locale]!;
-          const created: LocaleDraft = {
-            ...emptyLocaleDraft(),
-            title: plan.body.title,
-            content: sent.content,
-          };
-          clearStoredDraft(null);
-          idRef.current = out.id;
-          etagRef.current = out.updated_at;
-          baseRef.current = {
-            locales: { [plan.locale]: created },
-            shared: {
-              categoryId: snapshot.shared.categoryId,
-              tags: snapshot.shared.tags,
-              featuredMedia: snapshot.shared.featuredMedia,
-              isBreaking: false,
-            },
-          };
-          setPost(out);
-          syncSlugs(out);
-          onCreatedRef.current?.(out);
-        } else {
-          for (const { locale, body } of plan.requests) {
-            const out = await api.patch<PostOut>(`/api/posts/${idRef.current}`, body, {
-              headers: ifMatch(etagRef.current ?? ""),
-            });
-            etagRef.current = out.updated_at;
-            baseRef.current = acknowledge(baseRef.current, snapshot, locale, body);
-            setPost(out);
-            syncSlugs(out);
+      // Several passes: edits that arrive while a request is in flight are sent straight after it, so a
+      // resolved flush means nothing is left behind (callers such as "Save and leave" rely on that).
+      for (let pass = 0; pass < MAX_PASSES; pass++) {
+        const plan = planSave({
+          postId: idRef.current,
+          base: baseRef.current,
+          cur: curRef.current,
+          activeLocale: localeRef.current,
+          published: publishedMap(postRef.current),
+          canBreak: canBreakRef.current,
+        });
+        if (plan.kind === "none") {
+          if (dirtyRef.current) {
+            dirtyRef.current = false;
+            setDirty(false);
+            clearStoredDraft(idRef.current);
           }
+          setStatus((s) =>
+            s.kind === "idle" || s.kind === "saved" ? s : { kind: "saved", at: Date.now() },
+          );
+          bump();
+          return true;
         }
-      } catch (e) {
-        if (isApiError(e) && e.status === 412) {
-          const current = e.details.current_updated_at;
-          setConflict({ currentUpdatedAt: typeof current === "string" ? current : null });
-          setStatus({ kind: "conflict" });
+        if (plan.kind === "blocked") {
+          // Still unsaved: stay dirty (leave guard) and keep the stored copy.
+          setStatus({ kind: "blocked", reason: plan.reason, locale: plan.locale });
           writeLocal();
           return false;
         }
-        const transient = !isApiError(e) || e.status === 0 || e.status === 429 || e.status >= 500;
-        if (transient) {
-          attemptRef.current += 1;
-          if (typeof navigator !== "undefined" && navigator.onLine === false) {
-            setStatus({ kind: "offline" });
+        setStatus({ kind: "saving" });
+        const snapshot = curRef.current;
+        try {
+          if (plan.kind === "create") {
+            let out: PostOut | null = null;
+            let adopted = false;
+            if (createUncertain.current === plan.body.title) {
+              out = await findRecentDuplicate(plan.body.title);
+              adopted = out !== null;
+            }
+            out ??= await api.post<PostOut>("/api/posts", plan.body);
+            createUncertain.current = null;
+            const sent = snapshot.locales[plan.locale]!;
+            const created: LocaleDraft = {
+              ...emptyLocaleDraft(),
+              title: plan.body.title,
+              content: sent.content,
+            };
+            clearStoredDraft(null);
+            idRef.current = out.id;
+            etagRef.current = out.updated_at;
+            baseRef.current = adopted
+              ? draftFromPost(out)
+              : {
+                  locales: { [plan.locale]: created },
+                  shared: {
+                    categoryId: snapshot.shared.categoryId,
+                    tags: snapshot.shared.tags,
+                    featuredMedia: snapshot.shared.featuredMedia,
+                    isBreaking: false,
+                  },
+                };
+            setPost(out);
+            syncSlugs(out);
+            onCreatedRef.current?.(out);
           } else {
-            setStatus({ kind: "retrying" });
-            const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attemptRef.current - 1));
-            timers.current.retry = setTimeout(() => void flushAgain(), delay);
+            for (const { locale, body } of plan.requests) {
+              const out = await api.patch<PostOut>(`/api/posts/${idRef.current}`, body, {
+                headers: ifMatch(etagRef.current ?? ""),
+              });
+              etagRef.current = out.updated_at;
+              baseRef.current = acknowledge(baseRef.current, snapshot, locale, body);
+              setPost(out);
+              syncSlugs(out);
+            }
           }
-        } else {
-          setStatus({ kind: "error", message: e.message });
+          attemptRef.current = 0;
+        } catch (e) {
+          if (isApiError(e) && e.status === 412) {
+            const current = e.details.current_updated_at;
+            setConflict({ currentUpdatedAt: typeof current === "string" ? current : null });
+            setStatus({ kind: "conflict" });
+            writeLocal();
+            return false;
+          }
+          const transient = !isApiError(e) || e.status === 0 || e.status === 429 || e.status >= 500;
+          if (plan.kind === "create" && transient) createUncertain.current = plan.body.title;
+          if (transient) {
+            attemptRef.current += 1;
+            if (typeof navigator !== "undefined" && navigator.onLine === false) {
+              setStatus({ kind: "offline" });
+            } else {
+              setStatus({ kind: "retrying" });
+              const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attemptRef.current - 1));
+              timers.current.retry = setTimeout(() => void flushAgain(), delay);
+            }
+          } else {
+            setStatus({ kind: "error", message: (e as Error).message });
+          }
+          writeLocal();
+          return false;
         }
-        writeLocal();
-        return false;
       }
-      attemptRef.current = 0;
-      // Edits made while the request was in flight still need saving.
-      const next = planSave({
-        postId: idRef.current,
-        base: baseRef.current,
-        cur: curRef.current,
-        activeLocale: localeRef.current,
-        published: publishedMap(postRef.current),
-        canBreak: canBreakRef.current,
-      });
-      if (next.kind === "patch" || next.kind === "create") {
-        setStatus({ kind: "dirty" });
-        scheduleSave(() => void flushAgain());
-        writeLocal();
-      } else {
-        dirtyRef.current = false;
-        setDirty(false);
-        clearStoredDraft(idRef.current);
-        setStatus({ kind: "saved", at: Date.now() });
-      }
+      // Still changing faster than we can save: leave it to the next autosave and say so.
+      setStatus({ kind: "dirty" });
+      scheduleSave(() => void flushAgain());
+      writeLocal();
       bump();
-      return true;
+      return false;
     },
-    [bump, scheduleSave, setConflict, setPost, syncSlugs, writeLocal],
+    [bump, findRecentDuplicate, scheduleSave, setConflict, setPost, syncSlugs, writeLocal],
   );
 
   /** Save now (after any save already running). Resolves true when nothing is left unsaved. */
@@ -421,10 +452,10 @@ export function usePostEditor({
       setDirty(false);
       setConflict(null);
       setStatus({ kind: "idle" });
-      setRestoreOffer(null);
       setEpoch((n) => n + 1);
       setContentTick((t) => t + 1);
       bump();
+      setRestoreOffer(findRestoreOfferRef.current());
     },
     [bump, setConflict, setPost],
   );
@@ -441,22 +472,42 @@ export function usePostEditor({
     );
   }, []);
 
-  const findRestoreOffer = useCallback((): RestoreOffer | null => {
+  useEffect(() => {
+    findRestoreOfferRef.current = findRestoreOffer;
+  });
+
+  /**
+   * Unsaved copies worth offering. A copy is moved to a separate `kept` key the moment it is offered, so
+   * nothing the editor does afterwards (autosave, clean-up, new edits) can overwrite or delete it. Only
+   * Restore and Discard remove it. A kept copy that already matches the server is dropped.
+   */
+  function findRestoreOffer(): RestoreOffer | null {
     const id = idRef.current;
     const serverTime = postRef.current ? Date.parse(postRef.current.updated_at) : 0;
     const base = baseRef.current;
+    const differs = (rec: StoredDraft) => {
+      const baseFields = base.locales[rec.locale];
+      return (
+        (baseFields ? !sameLocaleDraft(baseFields, rec.fields) : hasAnyField(rec.fields)) ||
+        !sameShared(base.shared, rec.shared)
+      );
+    };
     const records: StoredDraft[] = [];
     for (const locale of LOCALES) {
-      const rec = readStoredDraft(id, locale);
-      if (!rec || rec.savedAt <= serverTime) continue;
-      const baseFields = base.locales[locale];
-      const differs =
-        (baseFields ? !sameLocaleDraft(baseFields, rec.fields) : hasAnyField(rec.fields)) ||
-        !sameShared(base.shared, rec.shared);
-      if (differs) records.push(rec);
+      const kept = readStoredDraft(id, locale, "kept");
+      if (kept) {
+        if (differs(kept)) records.push(kept);
+        else clearStoredDraft(id, locale, "kept");
+        continue;
+      }
+      const live = readStoredDraft(id, locale);
+      if (!live || live.savedAt <= serverTime || !differs(live)) continue;
+      writeStoredDraft(id, live, "kept");
+      clearStoredDraft(id, locale);
+      records.push(live);
     }
     return records.length ? { records } : null;
-  }, []);
+  }
 
   /** Pull the stored copy back into the editor (as unsaved changes). */
   const restoreLocal = useCallback(() => {
@@ -471,37 +522,55 @@ export function usePostEditor({
     setRestoreOffer(null);
     setEpoch((n) => n + 1);
     changed(true, true);
-  }, [changed, restoreOffer]);
+    writeLocal(); // the live copy is back in place before the kept one goes
+    for (const rec of records) clearStoredDraft(idRef.current, rec.locale, "kept");
+  }, [changed, restoreOffer, writeLocal]);
 
+  /** Delete the kept copy. The UI asks for confirmation first. */
   const dismissRestore = useCallback(() => {
     setRestoreOffer(null);
-    clearStoredDraft(idRef.current);
+    clearStoredDraft(idRef.current, undefined, "kept");
   }, []);
 
   useEffect(() => {
     // Read after mount: localStorage does not exist on the server.
-    setRestoreOffer(findRestoreOffer());
-  }, [findRestoreOffer]);
+    setRestoreOffer(findRestoreOfferRef.current());
+  }, []);
 
-  /** The conflict banner's "Load their version": fetch, keep my copy in localStorage, offer to restore it. */
+  /** The conflict banner's "Load their version": fetch, keep my copy aside, offer to restore it. */
   const loadTheirs = useCallback(async () => {
-    writeLocal();
     const id = idRef.current;
     if (!id) return;
+    writeLocal();
     const out = await api.get<PostOut>(`/api/posts/${id}`);
     resetFromPost(out, { keepStored: true });
-    setRestoreOffer(findRestoreOffer());
-  }, [findRestoreOffer, resetFromPost, writeLocal]);
+  }, [resetFromPost, writeLocal]);
 
-  /** The conflict banner's "Overwrite": adopt their `updated_at` and send my changes again. */
-  const overwrite = useCallback(async () => {
+  /**
+   * The conflict banner's "Overwrite": fetch the current post, take its values for every field I did not
+   * touch, keep my edits on top, adopt its `updated_at` and save. A failed fetch leaves the banner up.
+   */
+  const overwrite = useCallback(async (): Promise<boolean> => {
     const id = idRef.current;
-    let updatedAt = conflictRef.current?.currentUpdatedAt ?? null;
-    if (!updatedAt && id) updatedAt = (await api.get<PostOut>(`/api/posts/${id}`)).updated_at;
-    if (updatedAt) etagRef.current = updatedAt;
+    if (!id) return false;
+    let out: PostOut;
+    try {
+      out = await api.get<PostOut>(`/api/posts/${id}`);
+    } catch {
+      toast.error("Could not load the current version. Try again.");
+      return false;
+    }
+    const server = draftFromPost(out);
+    curRef.current = mergeDrafts(baseRef.current, curRef.current, server);
+    baseRef.current = server;
+    etagRef.current = out.updated_at;
+    setPost(out);
     setConflict(null);
+    setEpoch((n) => n + 1);
+    setContentTick((t) => t + 1);
+    bump();
     return flush();
-  }, [flush, setConflict]);
+  }, [bump, flush, setConflict, setPost]);
 
   /** A workflow action elsewhere hit a 412: show the same banner. */
   const reportConflict = useCallback(
