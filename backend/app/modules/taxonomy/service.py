@@ -1,4 +1,4 @@
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +9,8 @@ from app.modules.taxonomy.models import Category, Tag
 from app.modules.taxonomy.schemas import CategoryCreate, CategoryNode, CategoryUpdate, TagCreate, TagUpdate
 
 MAX_CATEGORY_DEPTH = 3  # root = 1
+# Serializes every category-tree write, so two concurrent moves cannot each look valid and together form a cycle.
+CATEGORY_TREE_LOCK = 7_301_995_001
 CATEGORY_SLUG_CONSTRAINT = "categories_slug_key"  # PostgreSQL's default name for the unique slug column
 
 
@@ -26,16 +28,29 @@ async def all_categories(session: AsyncSession) -> dict[int, Category]:
 
 
 def _depth(cats: dict[int, Category], cat_id: int) -> int:
-    depth, current = 0, cat_id
-    while current is not None:
+    """Levels from the root down to cat_id (root = 1). Bounded, so a cycle already in the data
+    ends the walk instead of hanging the event loop."""
+    depth, current, seen = 0, cat_id, set()
+    while current is not None and current not in seen and depth <= len(cats):
+        seen.add(current)
         depth += 1
         current = cats[current].parent_id
     return depth
 
 
 def _height(cats: dict[int, Category], cat_id: int) -> int:
-    children = [c.id for c in cats.values() if c.parent_id == cat_id]
-    return 1 + max((_height(cats, child) for child in children), default=0)
+    """Levels of the subtree rooted at cat_id (a leaf = 1); visits each category at most once."""
+    children: dict[int | None, list[int]] = {}
+    for c in cats.values():
+        children.setdefault(c.parent_id, []).append(c.id)
+    seen = {cat_id}
+    level, height = [cat_id], 0
+    while level:
+        height += 1
+        nxt = [k for parent in level for k in children.get(parent, []) if k not in seen]
+        seen.update(nxt)
+        level = nxt
+    return height
 
 
 def descendant_ids(cats: dict[int, Category], cat_id: int) -> set[int]:
@@ -71,10 +86,15 @@ async def get_category(session: AsyncSession, cat_id: int) -> Category:
     return cat
 
 
+async def _lock_tree(session: AsyncSession) -> None:
+    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": CATEGORY_TREE_LOCK})
+
+
 async def create_category(session: AsyncSession, data: CategoryCreate) -> Category:
     slug = data.slug if data.slug is not None else make_slug(data.name_en)
     if not is_valid_slug(slug):
         raise _invalid_slug()
+    await _lock_tree(session)
     cats = await all_categories(session)
     if data.parent_id is not None:
         _check_parent(cats, None, data.parent_id)
@@ -101,6 +121,7 @@ async def create_category(session: AsyncSession, data: CategoryCreate) -> Catego
 
 
 async def update_category(session: AsyncSession, cat_id: int, data: CategoryUpdate) -> Category:
+    await _lock_tree(session)
     cats = await all_categories(session)
     cat = cats.get(cat_id)
     if cat is None:

@@ -214,3 +214,49 @@ async def test_create_race_on_the_slug_constraint_is_slug_taken(client, session,
     r = await create_cat(client, editor, slug="sports")
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "SLUG_TAKEN"
+
+
+async def make_cycle(session):
+    from sqlalchemy import update
+
+    from app.modules.taxonomy.models import Category
+
+    a = await make_category(session, slug="cycle-a")
+    b = await make_category(session, slug="cycle-b", parent_id=a.id)
+    await session.execute(update(Category).where(Category.id == a.id).values(parent_id=b.id))
+    return a, b
+
+
+async def test_ancestor_and_height_walks_survive_a_cycle_in_the_data(session):
+    import threading
+
+    from app.modules.taxonomy import service
+
+    a, b = await make_cycle(session)
+    cats = await service.all_categories(session)
+    out: dict = {}
+
+    def walk():
+        out["depth"] = service._depth(cats, a.id)
+        out["height"] = service._height(cats, a.id)
+        out["found"] = service.descendant_ids(cats, a.id)
+
+    # A daemon thread, so a regression fails the test instead of hanging the run.
+    t = threading.Thread(target=walk, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive(), "walk over a cyclic tree did not return"
+    assert out["depth"] <= len(cats) + 1
+    assert out["height"] <= len(cats) + 1
+    assert out["found"] == {a.id, b.id}
+
+
+async def test_category_writes_take_the_advisory_lock(client, session):
+    from sqlalchemy import text
+
+    editor = await make_user(session, role=Role.editor)
+    held = "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+    assert await session.scalar(text(held)) == 0
+    created = await create_cat(client, editor)
+    assert created.status_code == 201
+    assert await session.scalar(text(held)) == 1  # transaction-scoped: held until the outer transaction ends
