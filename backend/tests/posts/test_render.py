@@ -151,3 +151,152 @@ def test_markup_in_caption_stays_text():
     assert [tag for tag, _ in start_tags(out)] == ["figure", "img", "figcaption"]
     assert "<script>" not in out
     assert "&lt;script&gt;" in out
+
+
+# --- tables, YouTube and embeds ---------------------------------------------------------------------------
+
+
+def cell(kind, value, **attrs):
+    return {"type": kind, "attrs": attrs, "content": [para(text(value))]}
+
+
+def table(*rows):
+    return {"type": "table", "content": [{"type": "tableRow", "content": list(r)} for r in rows]}
+
+
+def test_table_renders_header_and_cells_with_spans():
+    out = render_html(doc(table(
+        [cell("tableHeader", "H1", colspan=2, rowspan=1)],
+        [cell("tableCell", "a", colspan=1, rowspan=3), cell("tableCell", "b")],
+    )))
+    assert out == (
+        '<div class="table-wrap"><table><tbody>'
+        '<tr><th colspan="2"><p>H1</p></th></tr>'
+        '<tr><td rowspan="3"><p>a</p></td><td><p>b</p></td></tr>'
+        "</tbody></table></div>"
+    )
+
+
+def test_table_bad_spans_are_dropped():
+    for bad in (0, 11, -1, True, "2", 1.5, None, [2]):
+        out = render_html(doc(table([cell("tableCell", "x", colspan=bad, rowspan=bad)])))
+        assert "colspan" not in out and "rowspan" not in out, bad
+        assert "<td><p>x</p></td>" in out
+
+
+def test_table_nesting_lists_and_nested_tables():
+    inner = table([cell("tableCell", "inner")])
+    outer = table([{"type": "tableCell", "attrs": {}, "content": [
+        {"type": "bulletList", "content": [{"type": "listItem", "content": [para(text("li"))]}]},
+        inner,
+    ]}])
+    out = render_html(doc(outer))
+    assert out.count("<table>") == 2
+    assert "<ul><li><p>li</p></li></ul>" in out and "<td><p>inner</p></td>" in out
+
+
+def test_table_cell_formatting_marks_survive():
+    out = render_html(doc(table([{"type": "tableCell", "content": [
+        para(text("x", {"type": "bold"}), textAlign="center"),
+    ]}])))
+    assert "<strong>x</strong>" in out and "text-align" in out
+
+
+def yt(src):
+    return render_html(doc({"type": "youtube", "attrs": {"src": src}}))
+
+
+def test_youtube_renders_privacy_enhanced_iframe():
+    for src in (
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://youtu.be/dQw4w9WgXcQ?t=5",
+        "https://www.youtube.com/embed/dQw4w9WgXcQ",
+        "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+        "https://m.youtube.com/watch?feature=x&v=dQw4w9WgXcQ",
+        "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+    ):
+        out = yt(src)
+        iframe = next(attrs for tag, attrs in start_tags(out) if tag == "iframe")
+        assert iframe["src"] == "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", src
+        assert "allowfullscreen" in iframe and iframe["allow"]
+        assert out.startswith('<div class="video-embed">')
+
+
+def test_youtube_rejects_other_hosts_and_bad_ids():
+    for src in (
+        "https://evil.com/watch?v=dQw4w9WgXcQ",
+        "https://www.youtube.com.evil.com/watch?v=dQw4w9WgXcQ",
+        "https://evil.com/https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://user:pw@www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://www.youtube.com:8080/watch?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/watch?v=short",
+        'https://www.youtube.com/watch?v="onload="x',
+        "javascript:alert(1)",
+        "//www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "",
+        None,
+        123,
+    ):
+        assert yt(src) == "", src
+
+
+def test_non_youtube_iframe_cannot_be_smuggled_via_text_or_attrs():
+    out = render_html(doc(para(text('<iframe src="https://evil.com"></iframe>'))))
+    assert "<iframe" not in out
+    out = yt("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    assert "evil" not in out
+
+
+def test_iframe_attribute_filter_is_defence_in_depth():
+    from app.modules.posts.render import _attribute_filter
+
+    assert _attribute_filter("iframe", "src", "https://evil.com/embed/dQw4w9WgXcQ") is None
+    assert _attribute_filter("iframe", "src", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ")
+    assert _attribute_filter("div", "class", "evil") is None
+
+
+def embed(provider, url):
+    return render_html(doc({"type": "embed", "attrs": {"provider": provider, "url": url}}))
+
+
+def test_embed_renders_blockquote_placeholder_without_script():
+    cases = {
+        "facebook": "https://www.facebook.com/mawapress/posts/123",
+        "x": "https://x.com/user/status/1",
+        "tiktok": "https://www.tiktok.com/@u/video/1",
+    }
+    for provider, url in cases.items():
+        out = embed(provider, url)
+        tags = start_tags(out)
+        assert [t for t, _ in tags] == ["blockquote", "a"]
+        assert tags[0][1] == {"class": "embed", "data-embed": provider}
+        assert tags[1][1]["href"] == url
+        assert "<script" not in out
+
+
+def test_embed_rejects_wrong_provider_domain_scheme_and_junk():
+    for provider, url in (
+        ("x", "https://www.facebook.com/a"),
+        ("facebook", "https://facebook.com.evil.com/a"),
+        ("facebook", "http://www.facebook.com/a"),
+        ("tiktok", "javascript:alert(1)"),
+        ("x", "https://user@x.com/a"),
+        ("x", 'https://x.com/a" onclick="x'),
+        ("myspace", "https://myspace.com/a"),
+        ("x", None),
+        (None, "https://x.com/a"),
+        (["x"], "https://x.com/a"),
+        ("x", "https://x.com/" + "a" * 3000),
+    ):
+        assert embed(provider, url) == "", (provider, url)
+
+
+def test_tables_and_embeds_malformed_input_never_raises():
+    cases = [
+        {"type": "table", "content": "bad"},
+        {"type": "table", "content": [{"type": "tableRow", "content": [{"type": "tableCell", "attrs": "x"}]}]},
+        {"type": "embed", "attrs": "bad"},
+        {"type": "youtube"},
+    ]
+    for case in cases:
+        assert isinstance(render_html(doc(case)), str)

@@ -220,26 +220,40 @@ class _Converter:
         if tag == "hr":
             return [{"type": "horizontalRule"}]
         if tag == "table":
-            return self.table(el)
+            return self.table(el, depth)
         if tag not in GROUPING:
             self.warn(f"unsupported element <{tag}> was kept as plain text")
         return self.blocks(el.children, depth)
 
-    def table(self, table: _Node) -> list[dict]:
-        self.warn("table converted to plain text rows")
-        rows: list[str] = []
+    def table(self, table: _Node, depth: int) -> list[dict]:
+        rows: list[dict] = []
         todo: list[_Node | str] = list(reversed(table.children))
-        while todo:  # iterative: tables nest arbitrarily deep
+        while todo:  # row groups (thead/tbody/tfoot/div) are walked iteratively; cells are converted recursively
             cur = todo.pop()
             if isinstance(cur, str):
                 continue
             if cur.tag == "tr":
-                cells = [_text_of(c) for c in cur.children if not isinstance(c, str) and c.tag in ("td", "th")]
-                if any(cells):
-                    rows.append(" | ".join(cells))
-            else:
+                cells = [self.cell(c, depth) for c in cur.children if not isinstance(c, str) and c.tag in ("td", "th")]
+                if cells:
+                    rows.append({"type": "tableRow", "content": cells})
+            elif cur.tag not in ("td", "th", "table"):
                 todo.extend(reversed(cur.children))
-        return [{"type": "paragraph", "content": [{"type": "text", "text": row}]} for row in rows]
+        return [{"type": "table", "content": rows}] if rows else []
+
+    def cell(self, el: _Node, depth: int) -> dict:
+        attrs = {name: n for name in ("colspan", "rowspan") if (n := self.span(el.attrs.get(name))) > 1}
+        node: dict = {"type": "tableHeader" if el.tag == "th" else "tableCell"}
+        if attrs:
+            node["attrs"] = attrs
+        node["content"] = self.blocks(el.children, depth) or [{"type": "paragraph"}]
+        return node
+
+    @staticmethod
+    def span(raw: str | None) -> int:
+        try:
+            return min(max(int((raw or "1").strip()), 1), 10)
+        except ValueError:
+            return 1
 
 
 def convert(html: str, images: dict[str, str] | None = None) -> tuple[dict, list[str]]:

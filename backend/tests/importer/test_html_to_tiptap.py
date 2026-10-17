@@ -39,11 +39,49 @@ def test_headings_lists_quote_rule_and_breaks():
     assert doc["content"][5]["content"][1] == {"type": "hardBreak"}
 
 
-def test_table_becomes_text_paragraphs_with_warning():
-    doc, warnings = convert("<table><tr><td><p>a</p></td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>")
-    assert [n["type"] for n in doc["content"]] == ["paragraph", "paragraph"]
-    assert doc["content"][0]["content"] == [text("a | b")]
-    assert len(warnings) == 1 and "table" in warnings[0]
+def test_table_becomes_real_table_nodes():
+    doc, warnings = convert("<table><thead><tr><th>H</th><th colspan=\"2\">I</th></tr></thead>"
+                            "<tbody><tr><td><p>a</p></td><td rowspan=\"x\">b</td><td>c</td></tr></tbody></table>")
+    assert warnings == []
+    (table,) = doc["content"]
+    assert table["type"] == "table"
+    head, body = table["content"]
+    assert [c["type"] for c in head["content"]] == ["tableHeader", "tableHeader"]
+    assert head["content"][1]["attrs"] == {"colspan": 2}
+    assert [c["type"] for c in body["content"]] == ["tableCell"] * 3
+    assert "attrs" not in body["content"][1]  # invalid rowspan dropped
+    assert body["content"][0]["content"] == [{"type": "paragraph", "content": [text("a")]}]
+    assert body["content"][1]["content"] == [{"type": "paragraph", "content": [text("b")]}]
+    out = render_html(doc)
+    assert "<th>" in out and '<th colspan="2">' in out and "<td><p>a</p></td>" in out
+
+
+def test_table_spans_are_clamped_and_cells_keep_safe_content_only():
+    doc, warnings = convert('<table><tr><td colspan="99" rowspan="0"><a href="javascript:x">j</a>'
+                            '<img src="evil.png"><ul><li>i</li></ul></td></tr></table>', {})
+    cell = doc["content"][0]["content"][0]["content"][0]
+    assert cell["attrs"] == {"colspan": 10}
+    types = [n["type"] for n in cell["content"]]
+    assert types == ["paragraph", "bulletList"]
+    assert cell["content"][0]["content"] == [text("j")]
+    assert any("image" in w for w in warnings) and any("link" in w for w in warnings)
+
+
+def test_nested_table_and_empty_cells():
+    doc, _ = convert("<table><tr><td><table><tr><td>in</td></tr></table></td><td></td></tr><tr></tr></table><table></table>")
+    assert len(doc["content"]) == 1
+    outer_row = doc["content"][0]["content"]
+    assert len(outer_row) == 1  # the empty <tr> and the empty table are skipped
+    first, second = outer_row[0]["content"]
+    assert first["content"][0]["type"] == "table"
+    assert second["content"] == [{"type": "paragraph"}]
+
+
+def test_deeply_nested_tables_do_not_raise():
+    html = "<table><tr><td>" * 300 + "x" + "</td></tr></table>" * 300
+    doc, warnings = convert(html)
+    assert isinstance(render_html(doc), str)
+    assert any("deeply nested" in w for w in warnings)
 
 
 def test_unknown_elements_keep_text_and_warn():
