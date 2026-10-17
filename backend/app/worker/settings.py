@@ -1,0 +1,34 @@
+"""arq entry point: `python -m uv run arq app.worker.settings.WorkerSettings`.
+
+Later tasks register their functions / cron jobs in the two lists below.
+"""
+
+from arq import cron
+from arq.connections import RedisSettings
+
+from app.core.config import get_settings
+from app.db.session import SessionLocal, engine
+from app.worker.maintenance import purge_refresh_tokens
+from app.worker.outbox import new_http_client, process_outbox
+
+
+async def startup(ctx: dict) -> None:
+    ctx["session_factory"] = SessionLocal
+    ctx["settings"] = get_settings()
+    ctx["http"] = new_http_client()
+
+
+async def shutdown(ctx: dict) -> None:
+    await ctx["http"].aclose()
+    await engine.dispose()
+
+
+class WorkerSettings:
+    functions: list = []
+    cron_jobs = [
+        cron(process_outbox, second=set(range(0, 60, 10)), run_at_startup=True, unique=True),
+        cron(purge_refresh_tokens, hour=3, minute=17, unique=True),
+    ]
+    redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
+    on_startup = startup
+    on_shutdown = shutdown

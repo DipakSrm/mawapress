@@ -1,0 +1,224 @@
+import json
+from contextlib import asynccontextmanager
+from datetime import timedelta
+
+import httpx
+from sqlalchemy import func, select, update
+
+from app.core.config import Settings
+from app.db.base import utcnow
+from app.db.outbox import OutboxEvent
+from app.worker.outbox import MAX_ATTEMPTS, process_outbox
+from tests.factories import make_category
+
+FULL = dict(
+    revalidate_url="https://web.test/api/revalidate",
+    revalidate_secret="s3cret",
+    cf_zone_id="zone1",
+    cf_api_token="cf-token",
+    site_url="https://mawapress.com",
+)
+
+
+def make_settings(**overrides) -> Settings:
+    return Settings(_env_file=None, **{**FULL, **overrides})
+
+
+class Recorder:
+    def __init__(self, status: int = 200):
+        self.status = status
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(self.status, json={"ok": self.status < 300})
+
+    def client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+
+    def body(self, i: int):
+        return json.loads(self.requests[i].content)
+
+
+def make_ctx(session, http, settings=None) -> dict:
+    @asynccontextmanager
+    async def factory():
+        yield session  # the test session owns the rollback
+
+    return {"session_factory": factory, "http": http, "settings": settings or make_settings()}
+
+
+async def add_event(session, topic="post.published", payload=None, **cols) -> OutboxEvent:
+    ev = OutboxEvent(topic=topic, payload=payload or {}, **cols)
+    session.add(ev)
+    await session.flush()
+    return ev
+
+
+async def post_payload(session, slugs=None, **extra) -> dict:
+    cat = await make_category(session, slug="morang")
+    return {
+        "post_id": "00000000-0000-0000-0000-0000000000a1",
+        "category_id": cat.id,
+        "slugs": slugs or {"ne": "ne-slug", "en": "en-slug"},
+        **extra,
+    }
+
+
+async def run(session, settings=None, status=200) -> Recorder:
+    rec = Recorder(status)
+    async with rec.client() as http:
+        await process_outbox(make_ctx(session, http, settings))
+    return rec
+
+
+async def test_success_marks_processed_and_sends_revalidation(session):
+    ev = await add_event(session, payload=await post_payload(session))
+    rec = await run(session)
+    await session.refresh(ev)
+    assert ev.processed_at is not None and ev.attempts == 0 and ev.dead_at is None
+    reval = rec.requests[0]
+    assert str(reval.url) == "https://web.test/api/revalidate"
+    assert reval.headers["x-revalidate-secret"] == "s3cret"
+    assert rec.body(0) == {
+        "tags": ["post:00000000-0000-0000-0000-0000000000a1", "home", "category:morang", "search"],
+        "paths": ["/en/morang/en-slug", "/ne/morang/ne-slug"],
+    }
+
+
+async def test_cf_purge_gets_absolute_urls(session):
+    await add_event(session, payload=await post_payload(session))
+    rec = await run(session)
+    purge = rec.requests[1]
+    assert str(purge.url) == "https://api.cloudflare.com/client/v4/zones/zone1/purge_cache"
+    assert purge.headers["authorization"] == "Bearer cf-token"
+    assert rec.body(1) == {"files": [
+        "https://mawapress.com/en/morang/en-slug", "https://mawapress.com/ne/morang/ne-slug",
+    ]}
+
+
+async def test_redirect_event_revalidates_and_purges_old_and_new_paths(session):
+    payload = await post_payload(
+        session,
+        slugs={"ne": "new"},
+        redirect={"from": "/ne/morang/old", "to": "/ne/morang/new"},
+        redirects=[
+            {"from": "/ne/morang/old", "to": "/ne/morang/new"},
+            {"from": "/ne/sports/new", "to": "/ne/morang/new"},
+        ],
+    )
+    await add_event(session, "post.updated", payload)
+    rec = await run(session)
+    paths = rec.body(0)["paths"]
+    assert paths == ["/ne/morang/new", "/ne/morang/old", "/ne/sports/new"]  # deduped, order kept
+    assert rec.body(1)["files"] == [f"https://mawapress.com{p}" for p in paths]
+
+
+async def test_unpublished_also_revalidates(session):
+    await add_event(session, "post.unpublished", await post_payload(session, slugs={"ne": "gone"}))
+    rec = await run(session)
+    assert rec.body(0)["paths"] == ["/ne/morang/gone"]
+
+
+async def test_cf_purge_batches_of_30(session):
+    redirects = [{"from": f"/ne/morang/old-{i}", "to": "/ne/morang/new"} for i in range(70)]
+    payload = await post_payload(session, slugs={"ne": "new"}, redirects=redirects)
+    await add_event(session, "post.updated", payload)
+    rec = await run(session, make_settings(revalidate_url=None))
+    assert [len(rec.body(i)["files"]) for i in range(len(rec.requests))] == [30, 30, 11]  # 70 sources + live path
+
+
+async def test_unset_config_skips_and_marks_processed(session):
+    ev = await add_event(session, payload=await post_payload(session))
+    rec = await run(session, make_settings(revalidate_url=None, cf_zone_id=None, cf_api_token=None))
+    await session.refresh(ev)
+    assert rec.requests == [] and ev.processed_at is not None
+
+
+async def test_partial_config_skips_only_that_handler(session):
+    await add_event(session, payload=await post_payload(session))
+    rec = await run(session, make_settings(cf_api_token=None))
+    assert [str(r.url) for r in rec.requests] == ["https://web.test/api/revalidate"]
+
+
+async def test_sent_back_makes_no_external_call(session):
+    ev = await add_event(session, "post.sent_back", {"post_id": "x", "note": None})
+    rec = await run(session)
+    await session.refresh(ev)
+    assert rec.requests == [] and ev.processed_at is not None
+
+
+async def test_unknown_topic_marked_processed_with_warning(session, caplog):
+    ev = await add_event(session, "post.mystery")
+    with caplog.at_level("WARNING"):
+        rec = await run(session)
+    await session.refresh(ev)
+    assert ev.processed_at is not None and rec.requests == []
+    assert "post.mystery" in caplog.text
+
+
+async def test_failure_schedules_backoff_and_records_error(session):
+    ev = await add_event(session, payload=await post_payload(session))
+    before = utcnow()
+    await run(session, status=500)
+    await session.refresh(ev)
+    assert ev.processed_at is None and ev.dead_at is None
+    assert ev.attempts == 1
+    assert "500" in ev.last_error
+    delay = ev.next_attempt_at - before
+    assert timedelta(seconds=19) < delay < timedelta(seconds=25)  # 2**1 * 10s
+
+
+async def test_network_error_is_a_failure_and_error_is_truncated(session):
+    ev = await add_event(session, payload=await post_payload(session))
+
+    def boom(request):
+        raise httpx.ConnectError("x" * 900)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as http:
+        await process_outbox(make_ctx(session, http))
+    await session.refresh(ev)
+    assert ev.attempts == 1 and len(ev.last_error) == 500
+
+
+async def test_fifth_failure_dead_letters(session):
+    ev = await add_event(session, payload=await post_payload(session), attempts=MAX_ATTEMPTS - 1)
+    await run(session, status=502)
+    await session.refresh(ev)
+    assert ev.attempts == MAX_ATTEMPTS and ev.dead_at is not None and ev.processed_at is None
+    assert (await run(session)).requests == []  # a dead row is never picked up again
+
+
+async def test_rows_waiting_for_backoff_are_skipped(session):
+    await add_event(session, payload=await post_payload(session), next_attempt_at=utcnow() + timedelta(minutes=5))
+    assert (await run(session)).requests == []
+
+
+async def test_due_retry_is_picked_up(session):
+    ev = await add_event(
+        session, payload=await post_payload(session), attempts=2, next_attempt_at=utcnow() - timedelta(seconds=1)
+    )
+    await run(session)
+    await session.refresh(ev)
+    assert ev.processed_at is not None
+
+
+async def test_batch_respects_limit_and_order(session):
+    await session.execute(update(OutboxEvent).values(processed_at=utcnow()))
+    events = [await add_event(session, "post.sent_back", {"n": i}) for i in range(55)]
+    await run(session)
+    done = (await session.scalars(
+        select(OutboxEvent.id).where(OutboxEvent.processed_at.is_not(None), OutboxEvent.id.in_([e.id for e in events]))
+    )).all()
+    assert sorted(done) == [e.id for e in events[:50]]
+    left = await session.scalar(select(func.count()).select_from(OutboxEvent).where(OutboxEvent.processed_at.is_(None)))
+    assert left == 5
+
+
+async def test_one_failing_row_does_not_block_others(session):
+    bad = await add_event(session, payload={"post_id": "p", "category_id": 1, "slugs": {}})
+    good = await add_event(session, "post.sent_back")
+    await run(session, status=500)
+    await session.refresh(bad)
+    await session.refresh(good)
+    assert bad.attempts == 1 and good.processed_at is not None
