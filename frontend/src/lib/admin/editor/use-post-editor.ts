@@ -53,6 +53,8 @@ export interface RestoreOffer {
   records: StoredDraft[];
   /** Some copy was saved before the newest server version: restoring merges instead of replacing. */
   stale: boolean;
+  /** The post id the copies are stored under (null = the new-post slot), kept even after a create. */
+  keyId: string | null;
 }
 
 interface Options {
@@ -121,6 +123,10 @@ export function usePostEditor({
   const [status, setStatus] = useState<SaveStatus>({ kind: "idle" });
   const [conflict, setConflictState] = useState<ConflictState | null>(null);
   const [restoreOffer, setRestoreOffer] = useState<RestoreOffer | null>(null);
+  const restoreOfferRef = useRef<RestoreOffer | null>(null);
+  useEffect(() => {
+    restoreOfferRef.current = restoreOffer;
+  }, [restoreOffer]);
 
   useEffect(() => {
     canBreakRef.current = canBreak;
@@ -308,7 +314,10 @@ export function usePostEditor({
               content: sent.content,
             };
             clearStoredDraft(userIdRef.current, null);
-            clearStoredDraft(userIdRef.current, null, undefined, "kept");
+            // A kept copy still on offer stays until the user restores or discards it.
+            if (!restoreOfferRef.current) {
+              clearStoredDraft(userIdRef.current, null, undefined, "kept");
+            }
             idRef.current = out.id;
             etagRef.current = out.updated_at;
             baseRef.current = adopted
@@ -553,7 +562,7 @@ export function usePostEditor({
       records.push(record);
     }
     if (!records.length) return null;
-    return { records, stale: records.some((r) => r.savedAt < serverTime) };
+    return { records, stale: records.some((r) => r.savedAt < serverTime), keyId: id };
   }
 
   /** Pull the stored copy back into the editor (as unsaved changes). */
@@ -572,14 +581,15 @@ export function usePostEditor({
     changed(true, true);
     writeLocal(); // the live copy is back in place before the kept one goes
     for (const rec of records) {
-      clearStoredDraft(userIdRef.current, idRef.current, rec.locale, "kept");
+      clearStoredDraft(userIdRef.current, restoreOffer.keyId, rec.locale, "kept");
     }
   }, [changed, restoreOffer, writeLocal]);
 
   /** Delete the kept copy. The UI asks for confirmation first. */
   const dismissRestore = useCallback(() => {
+    const keyId = restoreOfferRef.current ? restoreOfferRef.current.keyId : idRef.current;
     setRestoreOffer(null);
-    clearStoredDraft(userIdRef.current, idRef.current, undefined, "kept");
+    clearStoredDraft(userIdRef.current, keyId, undefined, "kept");
   }, []);
 
   useEffect(() => {

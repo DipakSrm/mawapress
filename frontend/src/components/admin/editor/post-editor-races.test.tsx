@@ -484,7 +484,40 @@ describe("create idempotency", () => {
 });
 
 describe("a successful create", () => {
-  it("clears the new-post live and kept copies for the user", async () => {
+  it("clears the new-post live copy for the user and leaves other users alone", async () => {
+    const stored = JSON.stringify({
+      savedAt: Date.now(),
+      locale: "ne",
+      fields: {
+        title: "Old unsaved idea",
+        content: { type: "doc", content: [{ type: "paragraph" }] },
+        excerpt: "",
+        seoTitle: "",
+        seoDescription: "",
+        slug: "",
+      },
+      shared: { categoryId: null, tags: [], featuredMedia: null, isBreaking: false },
+    });
+    window.localStorage.setItem("mawapress:draft:u-ed:new:en", stored);
+    window.localStorage.setItem("mawapress:kept:u-rep:new:ne", stored); // another user's: stays
+    const calls = writes(() =>
+      HttpResponse.json(
+        post({ id: "made", updated_at: T1, translations: [tr("ne", { title: "Headline" })] }),
+      ),
+    );
+    const { user } = mount(null);
+    await user.type(await title(), "Headline");
+    await user.selectOptions(await screen.findByLabelText("Category"), "1");
+    await save(user);
+    await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(1));
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/posts/made"));
+    expect(window.localStorage.getItem("mawapress:draft:u-ed:new:en")).toBeNull();
+    expect(window.localStorage.getItem("mawapress:kept:u-rep:new:ne")).toBe(stored);
+  });
+});
+
+describe("a pending kept:new offer", () => {
+  it("survives a successful create and is offered again on a remount of /new", async () => {
     const stored = JSON.stringify({
       savedAt: Date.now(),
       locale: "ne",
@@ -499,21 +532,22 @@ describe("a successful create", () => {
       shared: { categoryId: null, tags: [], featuredMedia: null, isBreaking: false },
     });
     window.localStorage.setItem("mawapress:kept:u-ed:new:ne", stored);
-    window.localStorage.setItem("mawapress:draft:u-ed:new:en", stored);
-    window.localStorage.setItem("mawapress:kept:u-rep:new:ne", stored); // another user's: stays
     const calls = writes(() =>
       HttpResponse.json(
         post({ id: "made", updated_at: T1, translations: [tr("ne", { title: "Headline" })] }),
       ),
     );
-    const { user } = mount(null);
-    await user.type(await title(), "Headline");
-    await user.selectOptions(await screen.findByLabelText("Category"), "1");
-    await save(user);
+    const first = mount(null);
+    expect(await screen.findByText("Unsaved changes found")).toBeInTheDocument();
+    await first.user.type(await title(), "Headline");
+    await first.user.selectOptions(await screen.findByLabelText("Category"), "1");
+    await save(first.user);
     await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(1));
     await waitFor(() => expect(window.location.pathname).toBe("/admin/posts/made"));
-    expect(window.localStorage.getItem("mawapress:kept:u-ed:new:ne")).toBeNull();
-    expect(window.localStorage.getItem("mawapress:draft:u-ed:new:en")).toBeNull();
-    expect(window.localStorage.getItem("mawapress:kept:u-rep:new:ne")).toBe(stored);
+    expect(window.localStorage.getItem("mawapress:kept:u-ed:new:ne")).toBe(stored);
+
+    first.unmount();
+    mount(null);
+    expect(await screen.findByText("Unsaved changes found")).toBeInTheDocument();
   });
 });
