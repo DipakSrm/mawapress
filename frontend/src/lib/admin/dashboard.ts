@@ -10,6 +10,7 @@ type PostStatus = components["schemas"]["PostStatus"];
 interface PostsQuery {
   status?: PostStatus;
   author_id?: string;
+  published_after?: string;
   limit?: number;
 }
 
@@ -18,12 +19,6 @@ export function fetchPosts(query: PostsQuery): Promise<PostList> {
 }
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
-export const PUBLISHED_SAMPLE = 100; // API page-size ceiling
-
-/** Posts published in the last 24 h, counted from the most recently updated published posts. */
-export function countRecentlyPublished(items: PostSummary[], now: number = Date.now()): number {
-  return items.filter((p) => p.published_at && now - Date.parse(p.published_at) <= DAY_MS).length;
-}
 
 export function usePostCount(key: string, query: PostsQuery, enabled = true) {
   return useQuery({
@@ -33,14 +28,16 @@ export function usePostCount(key: string, query: PostsQuery, enabled = true) {
   });
 }
 
+/** Exact count of posts published in the last 24 h (server-side `published_after` filter). */
 export function usePublishedLast24h() {
   return useQuery({
     queryKey: ["posts", "published-24h"],
-    queryFn: async () => {
-      const res = await fetchPosts({ status: "published", limit: PUBLISHED_SAMPLE });
-      const count = countRecentlyPublished(res.items);
-      return { count, capped: res.items.length === PUBLISHED_SAMPLE && count === PUBLISHED_SAMPLE };
-    },
+    queryFn: () =>
+      fetchPosts({
+        status: "published",
+        published_after: new Date(Date.now() - DAY_MS).toISOString(),
+        limit: 1,
+      }).then((r) => r.total),
   });
 }
 

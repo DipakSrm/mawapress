@@ -20,13 +20,13 @@ setupAdminTest();
 
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
 
-function post(id: string, status: string, title: string, publishedHoursAgo?: number) {
+function post(id: string, status: string, title: string) {
   return {
     id,
     author_id: "u-rep",
     author_name: "Rita Reporter",
     category_id: 1,
-    published_at: publishedHoursAgo === undefined ? null : hoursAgo(publishedHoursAgo),
+    published_at: null,
     scheduled_at: null,
     status,
     translations: [{ locale: "ne", slug: id, status: "draft", title }],
@@ -52,16 +52,7 @@ function mockPosts(user: TestUser) {
         case "scheduled":
           return totals(2);
         case "published":
-          return HttpResponse.json({
-            items: [
-              post("p1", "published", "Fresh", 2),
-              post("p2", "published", "Older", 30),
-              post("p3", "published", "Another", 5),
-            ],
-            total: 3,
-            limit: 100,
-            offset: 0,
-          });
+          return q.get("published_after") ? totals(2) : totals(40);
         default:
           return HttpResponse.json({
             items: [post("r1", "draft", "मोरङको खबर"), post("r2", "in_review", "Budget day")],
@@ -83,6 +74,11 @@ describe("dashboard", () => {
     expect(screen.getByTestId("stat-In review")).toHaveTextContent("3");
     expect(screen.getByTestId("stat-Scheduled")).toHaveTextContent("2");
     expect(screen.getByTestId("stat-Published (24 h)")).toHaveTextContent("2");
+    const pub = seen.find((q) => q.get("status") === "published");
+    expect(Date.now() - Date.parse(pub?.get("published_after") ?? "")).toBeLessThan(
+      60_000 + 86_400_000,
+    );
+    expect(Date.now() - Date.parse(pub?.get("published_after") ?? "")).toBeGreaterThan(86_300_000);
     expect(seen.find((q) => q.get("status") === "draft")?.get("author_id")).toBe("u-ed");
   });
 

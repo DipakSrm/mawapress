@@ -2097,6 +2097,8 @@ export interface operations {
                 category_id?: number | null;
                 locale?: ("ne" | "en") | null;
                 q?: string | null;
+                published_after?: string | null;
+                published_before?: string | null;
                 limit?: number;
                 offset?: number;
             };

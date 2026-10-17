@@ -222,10 +222,10 @@ export function Dashboard() {
           label="Published (24 h)"
           icon={Globe}
           tone="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-          value={published.data?.count}
+          value={published.data}
           loading={published.isPending}
           failed={published.isError}
-          hint={published.data?.capped ? "At least this many" : "In the last 24 hours"}
+          hint="In the last 24 hours"
           href="/admin/posts?status=published"
         />
       </section>

@@ -732,6 +732,8 @@ async def list_posts(
     category_id: int | None = None,
     locale: str | None = None,
     q: str | None = None,
+    published_after: datetime | None = None,
+    published_before: datetime | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> tuple[list[tuple[Post, str]], int]:
@@ -744,6 +746,10 @@ async def list_posts(
         conditions.append(Post.status == status)
     if category_id is not None:
         conditions.append(Post.category_id == category_id)
+    if published_after is not None:
+        conditions.append(Post.published_at >= published_after)
+    if published_before is not None:
+        conditions.append(Post.published_at < published_before)
 
     translation_conditions = []
     if locale is not None:
