@@ -25,7 +25,16 @@ import {
   Undo2,
   Video,
 } from "lucide-react";
-import { useEffect, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FocusEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -157,19 +166,48 @@ export function Toolbar({ editor, containerRef, onLink, onImage, onMedia }: Tool
     }
   }
 
+  const rootRef = useRef<HTMLDivElement>(null);
+  const activeItem = useRef<HTMLElement | null>(null);
+
+  const toolbarItems = () =>
+    Array.from(
+      rootRef.current?.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), select:not([disabled])",
+      ) ?? [],
+    );
+
+  // Roving tabindex (WAI-ARIA toolbar): exactly one item is a tab stop; arrows move between items.
+  useLayoutEffect(() => {
+    const items = toolbarItems();
+    if (!activeItem.current || !items.includes(activeItem.current))
+      activeItem.current = items[0] ?? null;
+    for (const el of items) el.tabIndex = el === activeItem.current ? 0 : -1;
+  });
+
+  function onFocus(e: FocusEvent<HTMLDivElement>) {
+    const target = e.target as HTMLElement;
+    if (!toolbarItems().includes(target) || target === activeItem.current) return;
+    activeItem.current = target;
+    for (const el of toolbarItems()) el.tabIndex = el === target ? 0 : -1;
+  }
+
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    // React events bubble through portals (colour popover, menus); only act on the toolbar's own items.
+    const target = e.target as HTMLElement;
+    if (!e.currentTarget.contains(target)) return;
+    const items = toolbarItems();
+    const i = items.indexOf(target);
+    if (i < 0) return;
     if (e.key === "Escape") {
       editor.commands.focus();
       return;
     }
-    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
-    const target = e.target as HTMLElement;
-    if (target.tagName !== "BUTTON") return;
-    const items = Array.from(
-      e.currentTarget.querySelectorAll<HTMLElement>("button:not([disabled]), select"),
-    ).filter((el) => el.offsetParent !== null || el === target);
-    const i = items.indexOf(target);
-    const next = items[(i + (e.key === "ArrowRight" ? 1 : -1) + items.length) % items.length];
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    let next: HTMLElement | undefined;
+    if (step) next = items[(i + step + items.length) % items.length];
+    else if (e.key === "Home") next = items[0];
+    else if (e.key === "End") next = items[items.length - 1];
+    else return;
     next?.focus();
     e.preventDefault();
   }
@@ -461,6 +499,8 @@ export function Toolbar({ editor, containerRef, onLink, onImage, onMedia }: Tool
       role="toolbar"
       aria-label="Formatting"
       aria-orientation="horizontal"
+      ref={rootRef}
+      onFocus={onFocus}
       onKeyDown={onKeyDown}
       className="sticky top-0 z-20 flex flex-wrap items-center gap-x-1 gap-y-1 rounded-t-lg border-b bg-card/95 px-2 py-1.5 backdrop-blur supports-backdrop-filter:bg-card/80"
     >

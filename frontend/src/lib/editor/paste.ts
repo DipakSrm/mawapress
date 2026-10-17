@@ -78,6 +78,13 @@ function safeHref(href: string): boolean {
   return /^(https?:|mailto:)/i.test(href.replace(/[\u0000- ]/g, ""));
 }
 
+function safeImageSrc(src: string): boolean {
+  return (
+    /^https:\/\//i.test(src) ||
+    (src.startsWith("/") && !src.startsWith("//") && !src.startsWith("/\\"))
+  );
+}
+
 export function cleanPastedHtml(html: string): string {
   // Conditional and plain comments (Word wraps content in <!--[if gte mso 9]>...<![endif]-->).
   const stripped = html.replace(/<!--[\s\S]*?-->/g, "");
@@ -88,7 +95,7 @@ export function cleanPastedHtml(html: string): string {
       el.replaceWith(...Array.from(el.childNodes)); // keep the text, drop the link
       continue;
     }
-    if (el.tagName === "IMG" && !/^https:\/\//i.test(el.getAttribute("src") ?? "")) {
+    if (el.tagName === "IMG" && !safeImageSrc(el.getAttribute("src") ?? "")) {
       el.remove(); // file:, data: and blob: images cannot be rendered on the site
       continue;
     }

@@ -233,11 +233,12 @@ describe("RichEditor", () => {
       '<p class="MsoNormal" style="mso-margin-top-alt:auto">' +
       '<b><span style="mso-bidi-font-family:Arial;font-family:Mukta;font-size:12pt;color:#C8102E">Bold</span></b> <span style="mso-spacerun:yes"> </span><i>italic</i> <o:p></o:p>' +
       '<a href="javascript:alert(1)">bad</a> <a href="https://mawapress.com">good</a></p>' +
-      '<img src="file:///C:/temp/x.png"></body></html>';
+      '<img src="file:///C:/temp/x.png"><img src="/media/ok.webp"><img src="//evil.com/x.png"><img src="/\\evil.com/x.png"></body></html>';
     act(() => editor.view.pasteHTML(word));
     const json = last();
     const text = JSON.stringify(json);
-    expect(text).not.toMatch(/mso|MsoNormal|o:p|javascript|file:/i);
+    expect(text).not.toMatch(/mso|MsoNormal|o:p|javascript|file:|evil\.com/i);
+    expect(collect(json, "image").map((n) => n.attrs?.src)).toEqual(["/media/ok.webp"]);
     const nodes = json.content?.flatMap((p) => p.content ?? []) ?? [];
     const bold = nodes.find((n) => n.text === "Bold");
     expect(bold?.marks?.map((m) => m.type)).toContain("bold");
@@ -249,6 +250,44 @@ describe("RichEditor", () => {
     });
     expect(nodes.find((n) => n.text === "good")?.marks?.[0].type).toBe("link");
     expect(nodes.find((n) => n.text === "italic")?.marks?.map((m) => m.type)).toContain("italic");
+  });
+
+  it("uses a roving tabindex: one tab stop, arrows move between items", async () => {
+    const { user } = await setup();
+    const toolbar = screen.getByRole("toolbar");
+    const stops = () =>
+      Array.from(toolbar.querySelectorAll<HTMLElement>("button:not([disabled]), select")).filter(
+        (el) => el.tabIndex === 0,
+      );
+    expect(stops()).toHaveLength(1);
+    const bold = screen.getByRole("button", { name: "Bold" });
+    bold.focus();
+    expect(stops()).toEqual([bold]);
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("button", { name: "Italic" })).toHaveFocus();
+    expect(stops()).toHaveLength(1);
+    await user.keyboard("{ArrowLeft}{ArrowLeft}");
+    expect(screen.getByLabelText("Paragraph style")).toHaveFocus();
+    await user.keyboard("{Home}");
+    expect(
+      toolbar.querySelector<HTMLElement>("button:not([disabled]), select:not([disabled])"),
+    ).toHaveFocus();
+  });
+
+  it("keeps arrow keys and Escape inside an open colour popover", async () => {
+    const { user, editor } = await setup();
+    await user.click(screen.getByRole("button", { name: "Text colour" }));
+    const swatch = await screen.findByRole("button", { name: "Black #000000" });
+    swatch.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("button", { name: "Undo" })).not.toHaveFocus();
+    expect(screen.getByRole("button", { name: "Redo" })).not.toHaveFocus();
+    const focusSpy = vi.spyOn(editor.commands, "focus");
+    await user.keyboard("{Escape}");
+    expect(focusSpy).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Black #000000" })).not.toBeInTheDocument(),
+    );
   });
 
   it("shows word and character counts", async () => {

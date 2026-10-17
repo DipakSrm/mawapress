@@ -300,3 +300,63 @@ def test_tables_and_embeds_malformed_input_never_raises():
     ]
     for case in cases:
         assert isinstance(render_html(doc(case)), str)
+
+
+# --- fix round: regex anchoring, pinned iframe attrs, depth cap and hostile HTML through nh3 ---------------
+
+
+def test_trailing_newline_cannot_slip_past_anchored_patterns():
+    from app.modules.posts.render import _attribute_filter
+
+    assert _attribute_filter("iframe", "src", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ\n") is None
+    assert yt("https://youtu.be/dQw4w9WgXcQ\n") == ""
+    assert yt("https://www.youtube.com/watch?v=dQw4w9WgXcQ%0A") == ""
+    assert "color" not in render_html(doc(para(text("x", {"type": "textStyle", "attrs": {"color": "#fff\n"}}))))
+    assert "font-size" not in render_html(
+        doc(para(text("x", {"type": "textStyle", "attrs": {"fontSize": "12px\n"}})))
+    )
+
+
+def test_iframe_title_loading_referrerpolicy_are_pinned():
+    from app.modules.posts.render import _attribute_filter
+
+    for attr in ("title", "loading", "referrerpolicy", "allow"):
+        assert _attribute_filter("iframe", attr, "anything else") is None
+    assert _attribute_filter("iframe", "loading", "lazy") == "lazy"
+    assert _attribute_filter("td", "colspan", "²") is None  # non-ASCII digits are not spans
+
+
+def test_nested_tables_hit_the_depth_cap_without_raising():
+    node = {"type": "table", "content": [{"type": "tableRow", "content": [cell("tableCell", "deep")]}]}
+    for _ in range(100):
+        node = {"type": "table", "content": [{"type": "tableRow", "content": [
+            {"type": "tableCell", "content": [node]}]}]}
+    out = render_html(doc(node))
+    assert "deep" not in out  # beyond MAX_DEPTH the content is dropped
+    assert out.count("<table>") < 100
+
+
+def test_hostile_html_is_stripped_by_the_real_nh3_config():
+    import nh3
+
+    from app.modules.posts import render as r
+
+    hostile = (
+        '<iframe src="https://evil.com/x" srcdoc="<script>1</script>" allow="camera" title="t" loading="eager" '
+        'referrerpolicy="unsafe-url" onload="x()"></iframe>'
+        '<iframe src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ" allow="camera; microphone"></iframe>'
+        '<table onclick="x()"><tbody><tr><td colspan="99" rowspan="0" onclick="x()">a</td>'
+        '<th colspan="3">b</th></tr></tbody></table>'
+        '<div class="evil" onclick="x()">d</div><blockquote class="embed" data-embed="myspace">q</blockquote>'
+        '<p onclick="x()" style="position:fixed;color:#fff">p</p>'
+    )
+    out = nh3.clean(
+        hostile, tags=r.ALLOWED_TAGS, attributes=r.ALLOWED_ATTRS, filter_style_properties=r.STYLE_PROPS,
+        link_rel="noopener nofollow", url_schemes={"http", "https", "mailto"}, attribute_filter=r._attribute_filter,
+    )
+    assert "evil.com" not in out and "srcdoc" not in out and "onload" not in out and "onclick" not in out
+    assert "camera" not in out and "microphone" not in out and "unsafe-url" not in out and "eager" not in out
+    assert "colspan=\"99\"" not in out and "rowspan" not in out and 'colspan="3"' in out
+    assert 'class="evil"' not in out and "myspace" not in out and "position" not in out
+    assert "#fff" in out.replace(" ", "")
+    assert "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ" in out

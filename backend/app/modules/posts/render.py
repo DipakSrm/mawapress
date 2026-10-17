@@ -2,12 +2,12 @@
 
 import html
 import re
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import SplitResult, parse_qs, urlsplit
 
 import nh3
 
-_COLOR = re.compile(r"^(#[0-9a-fA-F]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\))$")
-_FONT_SIZE = re.compile(r"^\d{1,2}(px|pt)$")
+_COLOR = re.compile(r"(#[0-9a-fA-F]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\))")
+_FONT_SIZE = re.compile(r"\d{1,2}(px|pt)")
 FONTS = {"Mukta", "Noto Sans Devanagari", "Inter"}
 LINE_HEIGHTS = {"1", "1.0", "1.15", "1.5", "2", "2.0"}
 ALIGNS = {"center", "right", "justify"}
@@ -31,8 +31,14 @@ ALLOWED_ATTRS = {tag: {"style"} for tag in _STYLED} | {
 }
 # Only values the renderer itself emits survive; nh3 enforces this after rendering as defence in depth.
 _CLASS_VALUES = {"video-embed", "table-wrap", "embed"}
-_IFRAME_SRC = re.compile(r"^https://www\.youtube-nocookie\.com/embed/[A-Za-z0-9_-]{11}$")
+_IFRAME_SRC = re.compile(r"https://www\.youtube-nocookie\.com/embed/[A-Za-z0-9_-]{11}")
 _IFRAME_ALLOW = "encrypted-media; picture-in-picture; fullscreen"
+_IFRAME_FIXED = {
+    "allow": _IFRAME_ALLOW,
+    "title": "YouTube video",
+    "loading": "lazy",
+    "referrerpolicy": "strict-origin-when-cross-origin",
+}
 EMBED_HOSTS = {
     "facebook": {"facebook.com", "www.facebook.com", "m.facebook.com", "fb.watch"},
     "x": {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"},
@@ -40,7 +46,7 @@ EMBED_HOSTS = {
 }
 _YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtube-nocookie.com",
              "www.youtube-nocookie.com"}
-_YT_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_YT_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 MAX_URL = 2048
 STYLE_PROPS = {"color", "background-color", "font-size", "font-family", "text-align", "line-height"}
 
@@ -48,7 +54,7 @@ STYLE_PROPS = {"color", "background-color", "font-size", "font-family", "text-al
 MAX_DEPTH = 64
 
 
-def _https_url(value: object, hosts: set[str]) -> object | None:
+def _https_url(value: object, hosts: set[str]) -> SplitResult | None:
     """A plain https URL (no credentials, custom port or odd characters) on one of `hosts`; else None."""
     url = _str(value)
     if not url or len(url) > MAX_URL or any(c.isspace() or c in "\"'<>\\" for c in url):
@@ -80,7 +86,7 @@ def youtube_id(value: object) -> str | None:
         candidate = segments[1]
     else:
         candidate = None
-    return candidate if candidate and _YT_ID.match(candidate) else None
+    return candidate if candidate and _YT_ID.fullmatch(candidate) else None
 
 
 def _span(value: object) -> int | None:
@@ -103,7 +109,7 @@ def _dict(value: object) -> dict:
 
 def _valid(value: object, pattern: re.Pattern) -> str | None:
     value = _str(value)
-    return value if value and pattern.match(value) else None
+    return value if value and pattern.fullmatch(value) else None
 
 
 def _choice(value: object, allowed: set[str]) -> str | None:
@@ -227,15 +233,15 @@ def _attribute_filter(tag: str, attr: str, value: str) -> str | None:
         return value if value in _CLASS_VALUES else None
     if tag == "iframe":
         if attr == "src":
-            return value if _IFRAME_SRC.match(value) else None
-        if attr == "allow":
-            return _IFRAME_ALLOW if value == _IFRAME_ALLOW else None
+            return value if _IFRAME_SRC.fullmatch(value) else None
+        if attr in _IFRAME_FIXED:
+            return _IFRAME_FIXED[attr] if value == _IFRAME_FIXED[attr] else None
         if attr == "allowfullscreen":
             return ""
     if attr == "data-embed":
         return value if value in EMBED_HOSTS else None
     if attr in ("colspan", "rowspan"):
-        return value if value.isdigit() and 1 <= int(value) <= 10 else None
+        return value if value.isascii() and value.isdigit() and 1 <= int(value) <= 10 else None
     return value
 
 
