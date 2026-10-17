@@ -17,6 +17,7 @@ from app.modules.posts.schemas import (
     PostOut,
     PostSummary,
     PostUpdate,
+    RevisionListOut,
     RevisionOut,
     SendBackIn,
     TranslationSummary,
@@ -150,14 +151,27 @@ async def unpublish_post(
     return post
 
 
-@router.get("/{post_id}/revisions", response_model=list[RevisionOut])
+@router.get("/{post_id}/revisions", response_model=RevisionListOut)
 async def list_revisions(
     post_id: uuid.UUID,
     locale: Locale | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(any_staff),
+    session: AsyncSession = Depends(get_session),
+) -> RevisionListOut:
+    items, total = await service.list_revisions(session, user, post_id, locale, limit=limit, offset=offset)
+    return RevisionListOut(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/{post_id}/revisions/{rev_id}", response_model=RevisionOut)
+async def get_revision(
+    post_id: uuid.UUID,
+    rev_id: int,
     user: User = Depends(any_staff),
     session: AsyncSession = Depends(get_session),
 ):
-    return await service.list_revisions(session, user, post_id, locale)
+    return await service.get_revision(session, user, post_id, rev_id)
 
 
 @router.post("/{post_id}/revisions/{rev_id}/restore", response_model=PostOut)

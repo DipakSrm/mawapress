@@ -6,6 +6,7 @@ from typing import NamedTuple
 from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.core.config import get_settings
 from app.core.errors import AppError
@@ -382,17 +383,49 @@ async def update_post(
     return UpdateResult(await _save(session, post), public_changed, slug_changes)
 
 
-async def list_revisions(
-    session: AsyncSession, user: User, post_id: uuid.UUID, locale: str | None = None
-) -> list[PostRevision]:
+async def _revisions_viewable_post(session: AsyncSession, user: User, post_id: uuid.UUID) -> Post:
     post = await get_post(session, post_id)
     if post.author_id != user.id and not _is_editor(user):
         raise AppError(403, "FORBIDDEN_ROLE", "You cannot view this post's revisions")
-    stmt = select(PostRevision).where(PostRevision.post_id == post_id)
+    return post
+
+
+async def list_revisions(
+    session: AsyncSession, user: User, post_id: uuid.UUID, locale: str | None = None,
+    *, limit: int = 20, offset: int = 0,
+) -> tuple[list[PostRevision], int]:
+    """One page of revisions, newest first, without content_json (get_revision has that)."""
+    await _revisions_viewable_post(session, user, post_id)
+    where = [PostRevision.post_id == post_id]
     if locale is not None:
-        stmt = stmt.where(PostRevision.locale == locale)
-    stmt = stmt.order_by(PostRevision.created_at.desc(), PostRevision.id.desc())
-    return list((await session.scalars(stmt)).all())
+        where.append(PostRevision.locale == locale)
+    total = await session.scalar(select(func.count()).select_from(PostRevision).where(*where))
+    stmt = (
+        select(PostRevision)
+        .options(defer(PostRevision.content_json))
+        .where(*where)
+        .order_by(PostRevision.created_at.desc(), PostRevision.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list((await session.scalars(stmt)).all()), total or 0
+
+
+async def _load_revision(session: AsyncSession, post_id: uuid.UUID, rev_id: int) -> PostRevision:
+    # populate_existing: a list query in the same session may have loaded this row without content_json.
+    rev = await session.scalar(
+        select(PostRevision)
+        .where(PostRevision.id == rev_id, PostRevision.post_id == post_id)
+        .execution_options(populate_existing=True)
+    )
+    if rev is None:
+        raise AppError(404, "REVISION_NOT_FOUND", "Revision not found")
+    return rev
+
+
+async def get_revision(session: AsyncSession, user: User, post_id: uuid.UUID, rev_id: int) -> PostRevision:
+    await _revisions_viewable_post(session, user, post_id)
+    return await _load_revision(session, post_id, rev_id)
 
 
 async def restore_revision(
@@ -404,9 +437,7 @@ async def restore_revision(
     translation is live. The slug is not restored: it changes only through the explicit slug field,
     which also writes redirects.
     """
-    rev = await session.get(PostRevision, rev_id)
-    if rev is None or rev.post_id != post_id:
-        raise AppError(404, "REVISION_NOT_FOUND", "Revision not found")
+    rev = await _load_revision(session, post_id, rev_id)
     data = PostUpdate(
         locale=rev.locale,
         title=rev.title,

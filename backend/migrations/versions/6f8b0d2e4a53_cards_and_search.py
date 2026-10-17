@@ -5,13 +5,14 @@ Revises: 5e7a9c1d3f42
 Create Date: 2026-10-17 15:30:00.000000
 
 """
+import html as html_lib
+import re
 from typing import Sequence, Union
 
 from alembic import op
+import nh3
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
-
-from app.modules.seo.generator import plain_text
 
 # revision identifiers, used by Alembic.
 revision: str = "6f8b0d2e4a53"
@@ -24,6 +25,19 @@ SEARCH_VECTOR_SQL = (
     "setweight(to_tsvector('simple'::regconfig, title), 'A') || "
     "setweight(to_tsvector('simple'::regconfig, body_text), 'B')"
 )
+
+# Frozen copy of seo.generator.plain_text as of this revision, so the backfill keeps its meaning
+# even if the live generator changes later.
+_FIGCAPTION = re.compile(r"<figcaption\b.*?</figcaption>", re.S | re.I)
+_BLOCK_END = re.compile(r"</(?:p|h[1-6]|li|blockquote|figure|td|th)>|<br\s*/?>", re.I)
+_WS = re.compile(r"\s+")
+
+
+def plain_text(html: str) -> str:
+    text = _FIGCAPTION.sub(" ", html)
+    text = _BLOCK_END.sub(" ", text)
+    text = nh3.clean(text, tags=set())
+    return _WS.sub(" ", html_lib.unescape(text)).strip()
 
 
 def upgrade() -> None:

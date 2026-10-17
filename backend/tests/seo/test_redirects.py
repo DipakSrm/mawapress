@@ -56,7 +56,7 @@ async def test_slug_change_moves_the_article_and_writes_a_301(client, session):
     assert event.payload["slugs"] == {"ne": "flood-news"}
     assert event.payload["redirect"] == {"from": OLD, "to": "/ne/morang/flood-news"}
 
-    [rev] = (await client.get(f"/api/posts/{live['id']}/revisions", headers=auth_header(editor))).json()
+    [rev] = (await client.get(f"/api/posts/{live['id']}/revisions", headers=auth_header(editor))).json()["items"]
     assert rev["slug"] == "badhi-samachar"
 
 

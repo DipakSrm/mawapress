@@ -94,16 +94,28 @@ class PostListOut(BaseModel):
     offset: int
 
 
-class RevisionOut(BaseModel):
+class RevisionSummary(BaseModel):
+    """A revision as listed: without content_json, which can be large."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     locale: str
     title: str
     slug: str
-    content_json: dict
     seo_title: str | None
     seo_description: str | None
     excerpt: str | None
     editor_id: uuid.UUID
     created_at: datetime
+
+
+class RevisionOut(RevisionSummary):
+    content_json: dict
+
+
+class RevisionListOut(BaseModel):
+    items: list[RevisionSummary]
+    total: int
+    limit: int
+    offset: int

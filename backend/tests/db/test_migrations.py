@@ -180,3 +180,10 @@ async def test_upgrade_gives_existing_users_token_version_zero():
         finally:
             await eng.dispose()
     assert version == 0
+
+
+def test_old_migrations_do_not_import_live_application_code():
+    # A migration must keep doing what it did when it shipped, so it may not depend on app code
+    # that later revisions of the app are free to change.
+    migration = Path(__file__).resolve().parents[2] / "migrations" / "versions" / "6f8b0d2e4a53_cards_and_search.py"
+    assert "app.modules" not in migration.read_text(encoding="utf-8")

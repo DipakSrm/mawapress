@@ -37,9 +37,14 @@ async def test_editing_a_published_translation_records_its_prior_state(client, s
 
     r = await revisions(client, editor, live)
     assert r.status_code == 200
-    [rev] = r.json()
+    assert (r.json()["total"], r.json()["limit"], r.json()["offset"]) == (1, 20, 0)
+    [rev] = r.json()["items"]
+    assert "content_json" not in rev  # the list is light; the detail endpoint has the content
     assert (rev["locale"], rev["title"], rev["slug"]) == ("ne", "बाढी समाचार", "badhi-samachar")
-    assert rev["content_json"] == doc("पानी परिरहेको छ")
+    detail = await client.get(f"/api/posts/{live['id']}/revisions/{rev['id']}", headers=auth_header(editor))
+    assert detail.status_code == 200
+    assert detail.json()["content_json"] == doc("पानी परिरहेको छ")
+    assert detail.json()["id"] == rev["id"]
     assert (rev["seo_title"], rev["seo_description"], rev["excerpt"]) == (None, None, None)
     assert rev["editor_id"] == str(editor.id)
     assert rev["created_at"]
@@ -54,7 +59,7 @@ async def test_no_revision_for_drafts_or_no_op_saves(client, session):
     live = await patch(client, editor, live, title="मस्यौदा")  # same title: nothing changed
     with_en = await patch(client, editor, live, locale="en", title="Draft English", content_json=doc("x"))
     await patch(client, editor, with_en, locale="en", title="Draft English 2")  # draft translation edit
-    assert (await revisions(client, editor, live)).json() == []
+    assert (await revisions(client, editor, live)).json()["items"] == []
 
 
 async def test_revisions_newest_first_and_visible_to_author_and_editors(client, session):
@@ -68,17 +73,17 @@ async def test_revisions_newest_first_and_visible_to_author_and_editors(client, 
 
     r = await revisions(client, reporter, live)
     assert r.status_code == 200
-    assert [rev["title"] for rev in r.json()] == ["पहिलो सम्पादन", "बाढी समाचार"]
+    assert [rev["title"] for rev in r.json()["items"]] == ["पहिलो सम्पादन", "बाढी समाचार"]
     assert (await revisions(client, other, live)).status_code == 403
     only_en = await client.get(f"/api/posts/{live['id']}/revisions", params={"locale": "en"}, headers=auth_header(editor))
-    assert only_en.json() == []
+    assert only_en.json()["items"] == [] and only_en.json()["total"] == 0
 
 
 async def test_restore_is_a_versioned_save(client, session):
     editor, live = await live_post(client, session)
     edited = await patch(client, editor, live, title="गलत शीर्षक", content_json=doc("गलत"))
     assert (await client.get("/api/public/posts/ne/badhi-samachar")).json()["title"] == "गलत शीर्षक"  # warm cache
-    [rev] = (await revisions(client, editor, live)).json()
+    [rev] = (await revisions(client, editor, live)).json()["items"]
 
     r = await client.post(
         f"/api/posts/{live['id']}/revisions/{rev['id']}/restore", headers=auth_if_match(editor, edited["updated_at"])
@@ -89,7 +94,7 @@ async def test_restore_is_a_versioned_save(client, session):
     assert r.json()["updated_at"] != edited["updated_at"]
 
     # The restore recorded the state it replaced, emitted post.updated and cleared the public cache.
-    assert [x["title"] for x in (await revisions(client, editor, live)).json()] == ["गलत शीर्षक", "बाढी समाचार"]
+    assert [x["title"] for x in (await revisions(client, editor, live)).json()["items"]] == ["गलत शीर्षक", "बाढी समाचार"]
     updates = await session.scalar(select(func.count()).select_from(OutboxEvent).where(OutboxEvent.topic == "post.updated"))
     assert updates == 2
     public = await client.get("/api/public/posts/ne/badhi-samachar")
@@ -101,7 +106,7 @@ async def test_restore_guards(client, session):
     reporter = await make_user(session)
     editor, live = await live_post(client, session)
     edited = await patch(client, editor, live, title="नयाँ")
-    [rev] = (await revisions(client, editor, live)).json()
+    [rev] = (await revisions(client, editor, live)).json()["items"]
     url = f"/api/posts/{live['id']}/revisions/{rev['id']}/restore"
 
     assert (await client.post(url, headers=auth_header(editor))).status_code == 428
@@ -119,4 +124,41 @@ async def test_restore_guards(client, session):
     missing = await client.post(
         f"/api/posts/{live['id']}/revisions/999999/restore", headers=auth_if_match(editor, edited["updated_at"])
     )
+    assert missing.status_code == 404
+
+
+async def test_revisions_are_paginated(client, session):
+    editor, live = await live_post(client, session)
+    for n in range(5):
+        live = await patch(client, editor, live, title=f"शीर्षक {n}")
+    url = f"/api/posts/{live['id']}/revisions"
+    headers = auth_header(editor)
+
+    page = await client.get(url, params={"limit": 2, "offset": 1}, headers=headers)
+    assert page.status_code == 200
+    body = page.json()
+    assert (body["total"], body["limit"], body["offset"]) == (5, 2, 1)
+    assert [x["title"] for x in body["items"]] == ["शीर्षक 2", "शीर्षक 1"]  # newest first, skipping the newest
+    assert (await client.get(url, params={"offset": 5}, headers=headers)).json()["items"] == []
+    for bad in ({"limit": 0}, {"limit": 101}, {"offset": -1}):
+        assert (await client.get(url, params=bad, headers=headers)).status_code == 422, bad
+    assert (await client.get(url, params={"limit": 100}, headers=headers)).status_code == 200
+
+
+async def test_revision_detail_guards(client, session):
+    reporter = await make_user(session)
+    editor, live = await live_post(client, session)
+    await patch(client, editor, live, title="नयाँ")
+    [rev] = (await revisions(client, editor, live)).json()["items"]
+    url = f"/api/posts/{live['id']}/revisions/{rev['id']}"
+
+    assert (await client.get(url, headers=auth_header(reporter))).status_code == 403
+    assert (await client.get(url)).status_code == 401
+    other = await publish_via_api(
+        client, editor, await create_post_via_api(client, editor, await make_category(session, slug="sports"), title="अर्को")
+    )
+    wrong_post = await client.get(f"/api/posts/{other['id']}/revisions/{rev['id']}", headers=auth_header(editor))
+    assert wrong_post.status_code == 404
+    assert wrong_post.json()["error"]["code"] == "REVISION_NOT_FOUND"
+    missing = await client.get(f"/api/posts/{live['id']}/revisions/999999", headers=auth_header(editor))
     assert missing.status_code == 404
