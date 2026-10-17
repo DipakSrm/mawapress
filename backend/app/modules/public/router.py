@@ -1,3 +1,4 @@
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -42,6 +43,7 @@ from app.modules.users.models import User
 router = APIRouter(prefix="/api/public", tags=["public"])
 
 SUPPORTED_LOCALES = ("ne", "en")
+POST_SLUG_PATTERN = re.compile(r"[a-z0-9-]{1,100}")  # anything else cannot exist; never cache its 404
 MAX_OFFSET = 1000  # deep pages are expensive and nobody reads them
 _category_tree = TypeAdapter(list[CategoryNode])  # dumping only; reads go through cached_model
 
@@ -109,7 +111,7 @@ async def get_public_post(
     redis: Redis = Depends(get_redis),
 ) -> PublicPostOut:
     # An unknown locale is just a page that does not exist: same 404 as a missing slug.
-    if locale not in SUPPORTED_LOCALES:
+    if locale not in SUPPORTED_LOCALES or POST_SLUG_PATTERN.fullmatch(slug) is None:
         raise _post_not_found()
     response.headers["Cache-Control"] = CACHE_CONTROL
     key = post_cache_key(locale, slug)
@@ -239,14 +241,18 @@ def _redirect_not_found() -> AppError:
 @router.get("/redirects/resolve", response_model=RedirectOut)
 async def resolve_redirect(
     response: Response,
-    path: str = Query(min_length=1, max_length=300),
+    path: str = Query(),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
 ) -> RedirectOut:
     """Used by the Next.js middleware before it renders a 404."""
-    if not path.startswith("/"):
-        raise AppError(422, "INVALID_PATH", "path must start with '/'")
+    if not path.startswith("/") or len(path) > seo_service.MAX_PATH_LENGTH:
+        raise AppError(422, "INVALID_PATH", f"path must start with '/' and be at most {seo_service.MAX_PATH_LENGTH} characters")
     response.headers["Cache-Control"] = CACHE_CONTROL
+    normalized = seo_service.normalize_article_path(path)
+    if normalized is None:  # cannot be an article path: no lookup, and nothing worth caching
+        raise _redirect_not_found()
+    path = normalized
     key = redirect_cache_key(path)
     cached = await cache_get(redis, key)
     if cached == NOT_FOUND_MARKER:

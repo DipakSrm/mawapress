@@ -143,7 +143,48 @@ async def test_resolve_validates_path(client):
     bad = await resolve(client, "ne/morang/x")
     assert bad.status_code == 422
     assert bad.json()["error"]["code"] == "INVALID_PATH"
-    assert (await resolve(client, "/" + "a" * 300)).status_code == 422
+    too_long = await resolve(client, "/" + "a" * 300)
+    assert too_long.status_code == 422
+    assert too_long.json()["error"]["code"] == "INVALID_PATH"
+    assert (await resolve(client, "/" + "a" * 299)).status_code == 404  # 300 chars is still allowed
+
+
+async def test_resolve_normalises_the_path_before_lookup(client, session):
+    editor, cat, live = await live_post(client, session)
+    await change_slug(client, editor, live, "flood-news")
+    expected = {"to_path": "/ne/morang/flood-news", "code": 301}
+    for variant in (
+        OLD + "?utm_source=x&y=1",
+        OLD + "#section",
+        OLD + "?a=1#frag",
+        "/ne//morang///badhi-samachar",
+        OLD + "/",
+        "/NE/morang/badhi-samachar",
+        "/Ne//morang/badhi-samachar/?q=1",
+    ):
+        r = await resolve(client, variant)
+        assert r.status_code == 200, variant
+        assert r.json() == expected, variant
+
+
+async def test_resolve_lowercases_only_the_locale_segment(client, session):
+    editor, cat, live = await live_post(client, session)
+    await change_slug(client, editor, live, "flood-news")
+    assert (await resolve(client, "/ne/Morang/badhi-samachar")).status_code == 404
+    assert (await resolve(client, "/ne/morang/Badhi-Samachar")).status_code == 404
+
+
+async def test_resolve_removes_only_one_trailing_slash_and_keeps_root(client, fake_redis):
+    for path in ("/", "/ne", "/ne/morang", "/ne/morang/a/b", "/xx/morang/a", "/ne/morang/a_b", "/ne/morang/ a"):
+        r = await resolve(client, path)
+        assert r.status_code == 404, path
+        assert r.json()["error"]["code"] == "REDIRECT_NOT_FOUND"
+    assert await fake_redis.keys("public:redirect:*") == []  # nothing off-pattern is cached
+
+
+async def test_resolve_caches_a_well_formed_miss_under_the_normalised_path(client, fake_redis):
+    assert (await resolve(client, "/NE//morang/missing/?x=1")).status_code == 404
+    assert await fake_redis.get(redirect_cache_key("/ne/morang/missing")) == NOT_FOUND_MARKER
 
 
 async def test_resolve_survives_redis_outage(client, session):

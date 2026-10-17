@@ -186,3 +186,16 @@ async def test_unknown_locale_is_404_envelope(client, session):
         r = await client.get(f"/api/public/posts/{locale}/badhi-samachar")
         assert r.status_code == 404, locale
         assert r.json()["error"]["code"] == "POST_NOT_FOUND"
+
+
+async def test_malformed_post_slug_is_404_without_a_negative_cache_entry(client, fake_redis):
+    from app.modules.public.service import post_cache_key
+
+    for slug in ("Bad_Slug", "a" * 101, "has.dot", "UPPER"):
+        r = await client.get(f"/api/public/posts/ne/{slug}")
+        assert r.status_code == 404, slug
+        assert r.json()["error"]["code"] == "POST_NOT_FOUND"
+        assert await fake_redis.get(post_cache_key("ne", slug)) is None
+    ok_shape = await client.get("/api/public/posts/ne/" + "a" * 100)
+    assert ok_shape.status_code == 404
+    assert await fake_redis.get(post_cache_key("ne", "a" * 100)) is not None  # well-formed miss is cached
