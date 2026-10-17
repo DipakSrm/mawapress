@@ -19,6 +19,7 @@ from app.modules.posts.schemas import (
     PostUpdate,
     RevisionListOut,
     RevisionOut,
+    ScheduleIn,
     SendBackIn,
     TranslationSummary,
 )
@@ -39,6 +40,7 @@ def _summary(post: Post, author_name: str) -> PostSummary:
         author_name=author_name,
         updated_at=post.updated_at,
         published_at=post.published_at,
+        scheduled_at=post.scheduled_at,
         translations=[TranslationSummary.model_validate(t) for t in post.translations],
     )
 
@@ -109,6 +111,40 @@ async def publish_post(
     redis: Redis = Depends(get_redis),
 ) -> Post:
     post = await service.publish_post(session, post_id, if_match)
+    await invalidate_public(redis, post)
+    return post
+
+
+@router.post("/{post_id}/schedule", response_model=PostOut)
+async def schedule_post(
+    post_id: uuid.UUID,
+    body: ScheduleIn,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+) -> Post:
+    return await service.schedule_post(session, post_id, if_match, body.scheduled_at)
+
+
+@router.post("/{post_id}/unschedule", response_model=PostOut)
+async def unschedule_post(
+    post_id: uuid.UUID,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+) -> Post:
+    return await service.unschedule_post(session, post_id, if_match)
+
+
+@router.post("/{post_id}/unarchive", response_model=PostOut)
+async def unarchive_post(
+    post_id: uuid.UUID,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(editors),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+) -> Post:
+    post = await service.unarchive_post(session, post_id, if_match)
     await invalidate_public(redis, post)
     return post
 

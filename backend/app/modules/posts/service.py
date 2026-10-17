@@ -1,6 +1,6 @@
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import NamedTuple
 
 from sqlalchemy import exists, func, select
@@ -476,14 +476,99 @@ async def publish_post(session: AsyncSession, post_id: uuid.UUID, if_match: str 
     if post.status not in (PostStatus.draft, PostStatus.in_review):
         raise AppError(409, "INVALID_TRANSITION", f"Cannot publish a post that is {post.status.value}")
     now = utcnow()
+    _apply_publish(session, post, now, now)
+    return await _save(session, post)
+
+
+def _apply_publish(session: AsyncSession, post: Post, now: datetime, published_at: datetime) -> None:
+    """Shared by manual and scheduled publishing; the caller holds the row lock, checked the status and saves.
+
+    `published_at` is when the post counts as published (the scheduled time for a scheduled post);
+    updated_at is `now`, so it is never earlier than a published date.
+    """
     post.status = PostStatus.published
-    post.published_at = post.published_at or now
+    post.published_at = post.published_at or published_at
+    post.scheduled_at = None
     post.updated_at = now
     for tr in post.translations:  # only the translations that exist right now
         if tr.status != TranslationStatus.published:
             tr.status = TranslationStatus.published
-            tr.published_at = now
+            tr.published_at = published_at
             tr.updated_at = now
+    session.add(_post_event("post.published", post))
+
+
+SCHEDULE_MIN_LEAD = timedelta(seconds=60)
+SCHEDULE_MAX_AHEAD = timedelta(days=365)
+
+
+async def schedule_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None, when: datetime) -> Post:
+    """draft | in_review | scheduled → scheduled (rescheduling allowed). Editor+; the router enforces the role."""
+    post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
+    if post.status not in (PostStatus.draft, PostStatus.in_review, PostStatus.scheduled):
+        raise AppError(409, "INVALID_TRANSITION", f"Cannot schedule a post that is {post.status.value}")
+    now = utcnow()
+    if when < now + SCHEDULE_MIN_LEAD:
+        raise AppError(422, "INVALID_SCHEDULE_TIME", "scheduled_at must be at least 60 seconds in the future")
+    if when > now + SCHEDULE_MAX_AHEAD:
+        raise AppError(422, "INVALID_SCHEDULE_TIME", "scheduled_at must be at most one year ahead")
+    post.status = PostStatus.scheduled
+    post.scheduled_at = when
+    post.updated_at = now
+    return await _save(session, post)
+
+
+async def unschedule_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None) -> Post:
+    post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
+    if post.status != PostStatus.scheduled:
+        raise AppError(409, "INVALID_TRANSITION", f"Cannot unschedule a post that is {post.status.value}")
+    post.status = PostStatus.draft
+    post.scheduled_at = None
+    post.updated_at = utcnow()
+    return await _save(session, post)
+
+
+async def due_post_ids(session: AsyncSession, limit: int) -> list[uuid.UUID]:
+    stmt = (
+        select(Post.id)
+        .where(Post.status == PostStatus.scheduled, Post.scheduled_at <= utcnow())
+        .order_by(Post.scheduled_at, Post.id)
+        .limit(limit)
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def publish_due_post(session: AsyncSession, post_id: uuid.UUID) -> Post | None:
+    """Internal (no If-Match): publish one scheduled post whose time has come, committing in the caller's session.
+
+    Returns None when the post is no longer due (published, unscheduled, rescheduled) or another
+    worker holds its row lock (SKIP LOCKED), so overlapping runs never double-publish.
+    """
+    stmt = (
+        select(Post)
+        .where(Post.id == post_id, Post.status == PostStatus.scheduled, Post.scheduled_at <= utcnow())
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
+    )
+    post = await session.scalar(stmt)
+    if post is None:
+        return None
+    _apply_publish(session, post, utcnow(), post.scheduled_at)
+    return await _save(session, post)
+
+
+async def unarchive_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None) -> Post:
+    """archived → published. Translation statuses were kept on unpublish, so published ones are visible again."""
+    post = await _get_post_for_update(session, post_id)
+    _check_version(post, if_match)
+    if post.status != PostStatus.archived:
+        raise AppError(409, "INVALID_TRANSITION", f"Cannot unarchive a post that is {post.status.value}")
+    if not any(t.status == TranslationStatus.published for t in post.translations):
+        raise AppError(409, "NO_PUBLISHED_TRANSLATION", "No translation is published; publish one before unarchiving")
+    post.status = PostStatus.published
+    post.updated_at = utcnow()
     session.add(_post_event("post.published", post))
     return await _save(session, post)
 
@@ -530,7 +615,7 @@ async def send_back_post(
 
 
 async def unpublish_post(session: AsyncSession, post_id: uuid.UUID, if_match: str | None) -> Post:
-    """published → archived. Translations keep their status (unarchive is M2b)."""
+    """published → archived. Translations keep their status, so unarchive can restore them."""
     post = await _get_post_for_update(session, post_id)
     _check_version(post, if_match)
     if post.status != PostStatus.published:

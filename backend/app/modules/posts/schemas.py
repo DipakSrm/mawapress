@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from app.modules.posts.models import PostStatus, TranslationStatus
 from app.modules.taxonomy.schemas import TagOut
@@ -20,6 +20,10 @@ class PostCreate(BaseModel):
 
 class SendBackIn(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
+
+
+class ScheduleIn(BaseModel):
+    scheduled_at: AwareDatetime
 
 
 class PostUpdate(BaseModel):
@@ -60,6 +64,7 @@ class PostOut(BaseModel):
     author_id: uuid.UUID
     category_id: int
     published_at: datetime | None
+    scheduled_at: datetime | None
     updated_at: datetime
     translations: list[TranslationOut]
     tags: list[TagOut]
@@ -84,6 +89,7 @@ class PostSummary(BaseModel):
     author_name: str
     updated_at: datetime
     published_at: datetime | None
+    scheduled_at: datetime | None
     translations: list[TranslationSummary]
 
 

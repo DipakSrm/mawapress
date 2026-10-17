@@ -9,6 +9,7 @@ from arq.connections import RedisSettings
 from app.core.config import get_settings
 from app.db.session import SessionLocal, engine
 from app.worker.maintenance import purge_refresh_tokens
+from app.worker.scheduler import SCHEDULER_TIMEOUT_SECONDS, publish_due_posts
 from app.worker.outbox import CRON_TIMEOUT_SECONDS, new_http_client, process_outbox
 
 
@@ -28,6 +29,7 @@ class WorkerSettings:
     cron_jobs = [
         # Ticks may overlap (unique only dedupes the same tick); the outbox lease makes that safe.
         cron(process_outbox, second=set(range(0, 60, 10)), run_at_startup=True, timeout=CRON_TIMEOUT_SECONDS),
+        cron(publish_due_posts, second={0, 30}, timeout=SCHEDULER_TIMEOUT_SECONDS),
         cron(purge_refresh_tokens, hour=3, minute=17, unique=True),
     ]
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
