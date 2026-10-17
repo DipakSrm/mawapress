@@ -67,7 +67,13 @@ export function allowedActions(
 // ---- public link -----------------------------------------------------------------------------
 
 /** `/{locale}/{category}/{slug}` of the best published translation (Nepali first), or null. */
-export function publicPath(post: PostSummary, categories: Category[] | undefined): string | null {
+export function publicPath(
+  post: {
+    category_id: number;
+    translations: { locale: string; slug: string; status: string }[];
+  },
+  categories: Category[] | undefined,
+): string | null {
   const category = categories?.find((c) => c.id === post.category_id);
   const tr =
     post.translations.find((t) => t.locale === "ne" && t.status === "published") ??
@@ -115,7 +121,8 @@ export type PostAction =
   | { type: "schedule"; scheduledAt: string }
   | { type: "unschedule" }
   | { type: "unpublish" }
-  | { type: "unarchive" };
+  | { type: "unarchive" }
+  | { type: "publish-translation"; locale: "ne" | "en" };
 
 export const CONFLICT_MESSAGE = "This post changed — refresh";
 
@@ -125,6 +132,8 @@ function requestFor(action: PostAction): { path: string; body?: unknown } {
       return { path: "send-back", body: action.note ? { note: action.note } : undefined };
     case "schedule":
       return { path: "schedule", body: { scheduled_at: action.scheduledAt } };
+    case "publish-translation":
+      return { path: `translations/${action.locale}/publish` };
     default:
       return { path: action.type };
   }
@@ -146,6 +155,8 @@ function successMessage(action: PostAction, out: PostOut): string {
       return "Unpublished";
     case "unarchive":
       return "Restored from the archive";
+    case "publish-translation":
+      return action.locale === "ne" ? "Nepali version published" : "English version published";
   }
 }
 
@@ -177,7 +188,7 @@ function patchRow(list: PostList, out: PostOut): PostList {
   };
 }
 
-export type ActionResult = { ok: true } | { ok: false; error: ApiError };
+export type ActionResult = { ok: true; post: PostOut } | { ok: false; error: ApiError };
 
 /**
  * Runs a workflow action for a list row.
@@ -192,7 +203,10 @@ export function usePostActions() {
   const [pendingId, setPendingId] = useState<string | null>(null);
 
   const run = useCallback(
-    async (post: PostSummary, action: PostAction): Promise<ActionResult> => {
+    async (
+      post: Pick<PostSummary, "id" | "updated_at">,
+      action: PostAction,
+    ): Promise<ActionResult> => {
       const { path, body } = requestFor(action);
       setPendingId(post.id);
       try {
@@ -204,7 +218,7 @@ export function usePostActions() {
         );
         void queryClient.invalidateQueries({ queryKey: ["posts"] });
         toast.success(successMessage(action, out));
-        return { ok: true };
+        return { ok: true, post: out };
       } catch (e) {
         if (!isApiError(e)) throw e;
         if (e.status === 412) {

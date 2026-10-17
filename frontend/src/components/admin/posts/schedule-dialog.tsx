@@ -17,7 +17,7 @@ import type { ActionResult, PostSummary } from "@/lib/admin/posts";
 import { toLocalInputValue, toOffsetIso, validateScheduleTime } from "@/lib/admin/posts";
 
 interface Props {
-  post: PostSummary;
+  post: Pick<PostSummary, "status" | "scheduled_at">;
   onClose: () => void;
   onSchedule: (scheduledAt: string) => Promise<ActionResult>;
 }

@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
-import { NewPostForm } from "@/components/admin/posts/new-post-form";
+import { PostEditor } from "@/components/admin/editor/post-editor";
 
 export const metadata: Metadata = { title: "New post" };
 
 export default function NewPostRoute() {
-  return <NewPostForm />;
+  return <PostEditor initial={null} />;
 }
